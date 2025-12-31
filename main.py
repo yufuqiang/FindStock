@@ -39,6 +39,11 @@ def load_cache():
     if os.path.exists(CACHE_FILE) and os.path.exists(META_FILE):
         try:
             df = pd.read_csv(CACHE_FILE)
+            # 检查是否有必要的列，如果没有则认为缓存失效
+            required_columns = ['中文名称', '中文行业', '52周最高', '52周最低']
+            if not all(col in df.columns for col in required_columns):
+                return None, None
+                
             with open(META_FILE, 'r') as f:
                 meta = json.load(f)
             return df, meta.get("last_updated", "未知时间")
@@ -188,33 +193,74 @@ def analyze_stocks(tickers):
 
 
 def main():
-    st.title("📈 巴菲特价值投资选股器")
-    
-    with st.expander("查看筛选标准 (巴菲特价值投资理念)", expanded=False):
-        st.markdown("""
-        **筛选标准：**
-        1. **高ROE**：净资产收益率 > 15%
-        2. **低负债**：债务权益比 < 150%
-        3. **高毛利**：毛利率 > 40%
-        4. **合理估值**：市盈率(PE) < 35
-        """)
-    
-    # 初始化 session state
+    # 初始化 session state (移到最前面，以便UI逻辑使用)
     if 'data' not in st.session_state:
         # 尝试加载缓存
         cached_df, last_updated = load_cache()
         if cached_df is not None:
             st.session_state.data = cached_df
             st.session_state.last_updated = last_updated
-            st.info(f"📅 已加载本地缓存数据，上次统计时间：{last_updated}")
         else:
             st.session_state.data = None
             st.session_state.last_updated = None
 
-    col1, col2 = st.columns([1, 4])
-    with col1:
+    # 注入 CSS 优化顶部空间和手机显示
+    st.markdown("""
+        <style>
+        /* 隐藏 Streamlit 默认的 Header 和 Footer */
+        header {visibility: hidden;}
+        .stApp > header {display: none;}
+        
+        /* 调整顶部内边距，避免被遮挡 */
+        .block-container {
+            padding-top: 2rem !important;
+            padding-bottom: 1rem !important;
+        }
+        h3 {
+            margin-top: 0 !important;
+            padding-top: 0 !important;
+        }
+        /* 调整按钮在手机上的显示 */
+        @media (max-width: 640px) {
+            .stButton > button {
+                width: 100%;
+            }
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # 顶部布局：标题 + 按钮 + 状态信息
+    # 使用单行布局，将标题和按钮放在一起
+    col_header, col_btn = st.columns([3, 1], gap="small")
+    
+    with col_header:
+        st.markdown("### 📈 价值投资选股器")
+        
+    with col_btn:
         btn_label = "重新选股" if st.session_state.data is not None else "开始选股"
-        start_btn = st.button(btn_label, type="primary")
+        start_btn = st.button(btn_label, type="primary", use_container_width=True)
+
+    # 紧凑的状态栏
+    if 'last_updated' in st.session_state and st.session_state.last_updated:
+        count_str = ""
+        if st.session_state.data is not None:
+            count_str = f" | 共 {len(st.session_state.data)} 只股票"
+        
+        # 将状态信息和筛选标准放在一行 (利用 columns)
+        c1, c2 = st.columns([2, 1])
+        with c1:
+             st.caption(f"📅 上次统计: {st.session_state.last_updated}{count_str}")
+        with c2:
+             with st.expander("查看筛选标准", expanded=False):
+                st.markdown("""
+                **筛选标准：**
+                1. **高ROE**：净资产收益率 > 15%
+                2. **低负债**：债务权益比 < 150%
+                3. **高毛利**：毛利率 > 40%
+                4. **合理估值**：市盈率(PE) < 35
+                """)
+    else:
+        st.caption("尚未获取数据")
     
     if start_btn:
         with st.spinner('正在获取S&P 500列表并分析数据，请耐心等待（这可能需要几分钟）...'):
@@ -233,14 +279,15 @@ def main():
 
     if st.session_state.data is not None:
         df = st.session_state.data
-        if 'last_updated' in st.session_state and st.session_state.last_updated:
-             st.caption(f"数据统计时间: {st.session_state.last_updated}")
+        # 移除重复的时间显示
+        # if 'last_updated' in st.session_state and st.session_state.last_updated:
+        #      st.caption(f"数据统计时间: {st.session_state.last_updated}")
 
         if df.empty:
             st.warning("没有找到符合所有条件的股票。")
         else:
-            st.success(f"筛选出 {len(df)} 只符合条件的股票：")
-            st.info("💡 点击表格中的行可以查看股票详情")
+            # st.success(f"筛选出 {len(df)} 只符合条件的股票：")
+            # st.info("💡 点击表格中的行可以查看股票详情")
             
             # 显示表格
             event = st.dataframe(
@@ -260,7 +307,8 @@ def main():
                 },
                 column_order=["代码", "中文名称", "中文行业", "当前价格", "52周最高", "52周最低", "市盈率(PE)", "ROE(%)", "债务权益比(%)", "毛利率(%)", "市值(亿)"],
                 hide_index=True,
-                use_container_width=True,
+                width='stretch',
+                height=700,
                 on_select="rerun",
                 selection_mode="single-row"
             )
