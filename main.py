@@ -404,24 +404,24 @@ def main():
     if st.session_state.data is not None:
         df = st.session_state.data
         
-        # 按照当前价最接近52周最低价排序
-        # 计算逻辑：(当前价格 - 52周最低) / 52周最低，值越小越靠前
-        try:
-            # 确保列是数值类型
-            df['当前价格'] = pd.to_numeric(df['当前价格'], errors='coerce')
-            df['52周最低'] = pd.to_numeric(df['52周最低'], errors='coerce')
-            
-            # 计算偏离度
-            df['low_diff'] = (df['当前价格'] - df['52周最低']) / df['52周最低']
-            
-            # 排序
-            df = df.sort_values(by='low_diff', ascending=True)
-        except Exception as e:
-            st.error(f"排序计算出错: {e}")
-
         if df.empty:
             st.warning("没有找到符合所有条件的股票。")
         else:
+            # 按照当前价最接近52周最低价排序
+            # 计算逻辑：(当前价格 - 52周最低) / 52周最低，值越小越靠前
+            try:
+                # 确保列是数值类型
+                df['当前价格'] = pd.to_numeric(df['当前价格'], errors='coerce')
+                df['52周最低'] = pd.to_numeric(df['52周最低'], errors='coerce')
+                
+                # 计算偏离度
+                df['low_diff'] = (df['当前价格'] - df['52周最低']) / df['52周最低']
+                
+                # 排序
+                df = df.sort_values(by='low_diff', ascending=True)
+            except Exception as e:
+                st.error(f"排序计算出错: {e}")
+
             # 显示表格
             # 提示用户操作
             st.caption("💡 单击表格中的行查看详细信息（已按接近52周最低价排序）")
