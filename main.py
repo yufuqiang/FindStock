@@ -81,8 +81,130 @@ fallback_market_data = {
     "V": {"current_price": 260.0, "year_low": 220.0, "year_high": 280.0}
 }
 
+def get_ticker_data(ticker):
+    """获取单个股票的行情数据，包含备用API"""
+    try:
+        print(f"正在获取{ticker}的行情数据")
+        stock = yf.Ticker(ticker)
+        info = stock.info
+        
+        # 获取所需的行情数据
+        current_price = info.get("currentPrice")
+        year_low = info.get("fiftyTwoWeekLow")
+        year_high = info.get("fiftyTwoWeekHigh")
+        
+        # 如果API数据不可用，尝试使用后备数据
+        if not current_price or not year_low or not year_high:
+            fallback_data = fallback_market_data.get(ticker, {})
+            if not current_price:
+                current_price = fallback_data.get('current_price')
+            if not year_low:
+                year_low = fallback_data.get('year_low')
+            if not year_high:
+                year_high = fallback_data.get('year_high')
+        
+        data = {
+            "current_price": current_price,
+            "year_low": year_low,
+            "year_high": year_high
+        }
+        print(f"{ticker}的行情数据: {data}")
+        return data
+                
+    except Exception as e:
+        print(f"获取{ticker}的行情数据失败: {e}")
+        
+        # 尝试使用Finnhub API作为备用接口
+        try:
+            print(f"尝试使用Finnhub API获取{ticker}的行情数据")
+            
+            # 从Streamlit secrets获取API密钥
+            finnhub_api_key = st.secrets.get("finnhub", {}).get("api_key")
+            
+            if not finnhub_api_key:
+                print("未配置Finnhub API密钥")
+                raise ValueError("Finnhub API密钥未配置")
+            
+            # 调用Finnhub API获取当前价格
+            finnhub_url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={finnhub_api_key}"
+            finnhub_response = requests.get(finnhub_url, timeout=5)
+            finnhub_response.raise_for_status()
+            finnhub_data = finnhub_response.json()
+            
+            current_price = finnhub_data.get("c")
+            
+            # 调用Finnhub API获取52周高低
+            finnhub_52w_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=price&token={finnhub_api_key}"
+            finnhub_52w_response = requests.get(finnhub_52w_url, timeout=5)
+            finnhub_52w_response.raise_for_status()
+            finnhub_52w_data = finnhub_52w_response.json()
+            
+            year_low = finnhub_52w_data.get("metric", {}).get("52WeekLow")
+            year_high = finnhub_52w_data.get("metric", {}).get("52WeekHigh")
+            
+            if current_price:
+                data = {
+                    "current_price": current_price,
+                    "year_low": year_low,
+                    "year_high": year_high
+                }
+                print(f"使用Finnhub API成功获取{ticker}的行情数据: {data}")
+                return data
+            else:
+                raise ValueError("Finnhub API未返回有效数据")
+                
+        except Exception as finnhub_error:
+            print(f"Finnhub API获取行情数据失败: {finnhub_error}")
+            
+            # 尝试使用Alpha Vantage API作为第二个备用接口
+            try:
+                print(f"尝试使用Alpha Vantage API获取{ticker}的行情数据")
+                
+                # 从Streamlit secrets获取API密钥
+                alpha_vantage_api_key = st.secrets.get("alpha_vantage", {}).get("api_key")
+                
+                if not alpha_vantage_api_key:
+                    print("未配置Alpha Vantage API密钥")
+                    raise ValueError("Alpha Vantage API密钥未配置")
+                
+                # 调用Alpha Vantage API获取当前价格和52周高低
+                alpha_vantage_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={alpha_vantage_api_key}"
+                alpha_vantage_response = requests.get(alpha_vantage_url, timeout=5)
+                alpha_vantage_response.raise_for_status()
+                alpha_vantage_data = alpha_vantage_response.json()
+                
+                global_quote = alpha_vantage_data.get("Global Quote", {})
+                current_price = global_quote.get("05. price")
+                year_low = global_quote.get("52. week low")
+                year_high = global_quote.get("52. week high")
+                
+                if current_price:
+                    # 转换数据类型
+                    current_price = float(current_price)
+                    year_low = float(year_low) if year_low else None
+                    year_high = float(year_high) if year_high else None
+                    
+                    data = {
+                        "current_price": current_price,
+                        "year_low": year_low,
+                        "year_high": year_high
+                    }
+                    print(f"使用Alpha Vantage API成功获取{ticker}的行情数据: {data}")
+                    return data
+                else:
+                    raise ValueError("Alpha Vantage API未返回有效数据")
+                    
+            except Exception as alpha_vantage_error:
+                print(f"Alpha Vantage API获取行情数据失败: {alpha_vantage_error}")
+                # 不使用默认值，只记录错误
+                return {
+                    "current_price": None,
+                    "year_low": None,
+                    "year_high": None
+                }
+
 def get_market_data(tickers):
-    """获取行情数据，先从本地缓存读取，缓存过期则从API获取
+    """获取行情数据，先从本地缓存读取，缓存过期则并发从API获取
     
     Args:
         tickers: 股票代码列表
@@ -121,135 +243,34 @@ def get_market_data(tickers):
     
     if missing_tickers:
         print(f"需要获取{len(missing_tickers)}个股票的新数据（缓存缺失或数据无效）")
+        
+        # 使用并发执行批量获取行情数据
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            # 提交所有任务
+            future_to_ticker = {executor.submit(get_ticker_data, ticker): ticker for ticker in missing_tickers}
+            
+            # 获取结果
+            for future in concurrent.futures.as_completed(future_to_ticker):
+                ticker = future_to_ticker[future]
+                try:
+                    data = future.result()
+                    new_market_data[ticker] = data
+                except Exception as e:
+                    print(f"获取{ticker}的行情数据时发生意外错误: {e}")
+                    new_market_data[ticker] = {
+                        "current_price": None,
+                        "year_low": None,
+                        "year_high": None
+                    }
     else:
         print(f"使用缓存行情数据，共{len(new_market_data)}个股票")
         return new_market_data
     
-    if missing_tickers:
-        print(f"需要获取{len(missing_tickers)}个股票的新数据")
-        
-        for ticker in missing_tickers:
-            try:
-                print(f"正在获取{ticker}的行情数据")
-                stock = yf.Ticker(ticker)
-                info = stock.info
-                
-                # 获取所需的行情数据
-                current_price = info.get("currentPrice")
-                year_low = info.get("fiftyTwoWeekLow")
-                year_high = info.get("fiftyTwoWeekHigh")
-                
-                # 如果API数据不可用，尝试使用后备数据
-                if not current_price or not year_low or not year_high:
-                    fallback_data = fallback_market_data.get(ticker, {})
-                    if not current_price:
-                        current_price = fallback_data.get('current_price')
-                    if not year_low:
-                        year_low = fallback_data.get('year_low')
-                    if not year_high:
-                        year_high = fallback_data.get('year_high')
-                
-                # 不设置默认值，只使用获取到的真实数据
-                new_market_data[ticker] = {
-                    "current_price": current_price,
-                    "year_low": year_low,
-                    "year_high": year_high
-                }
-                print(f"{ticker}的行情数据: {new_market_data[ticker]}")
-                
-                # 添加延迟，避免被限流
-                time.sleep(1.0)
-                
-            except Exception as e:
-                print(f"获取{ticker}的行情数据失败: {e}")
-                
-                # 尝试使用Finnhub API作为备用接口
-                try:
-                    print(f"尝试使用Finnhub API获取{ticker}的行情数据")
-                    
-                    # 从Streamlit secrets获取API密钥
-                    finnhub_api_key = st.secrets.get("finnhub", {}).get("api_key")
-                    
-                    if not finnhub_api_key:
-                        print("未配置Finnhub API密钥")
-                        raise ValueError("Finnhub API密钥未配置")
-                    
-                    # 调用Finnhub API获取当前价格
-                    finnhub_url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={finnhub_api_key}"
-                    finnhub_response = requests.get(finnhub_url, timeout=5)
-                    finnhub_response.raise_for_status()
-                    finnhub_data = finnhub_response.json()
-                    
-                    current_price = finnhub_data.get("c")
-                    
-                    # 调用Finnhub API获取52周高低
-                    finnhub_52w_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=price&token={finnhub_api_key}"
-                    finnhub_52w_response = requests.get(finnhub_52w_url, timeout=5)
-                    finnhub_52w_response.raise_for_status()
-                    finnhub_52w_data = finnhub_52w_response.json()
-                    
-                    year_low = finnhub_52w_data.get("metric", {}).get("52WeekLow")
-                    year_high = finnhub_52w_data.get("metric", {}).get("52WeekHigh")
-                    
-                    if current_price:
-                        # 不设置默认值，只使用获取到的真实数据
-                        new_market_data[ticker] = {
-                            "current_price": current_price,
-                            "year_low": year_low,
-                            "year_high": year_high
-                        }
-                        print(f"使用Finnhub API成功获取{ticker}的行情数据: {new_market_data[ticker]}")
-                    else:
-                        raise ValueError("Finnhub API未返回有效数据")
-                        
-                except Exception as finnhub_error:
-                    print(f"Finnhub API获取行情数据失败: {finnhub_error}")
-                    
-                    # 尝试使用Alpha Vantage API作为第二个备用接口
-                    try:
-                        print(f"尝试使用Alpha Vantage API获取{ticker}的行情数据")
-                        
-                        # 从Streamlit secrets获取API密钥
-                        alpha_vantage_api_key = st.secrets.get("alpha_vantage", {}).get("api_key")
-                        
-                        if not alpha_vantage_api_key:
-                            print("未配置Alpha Vantage API密钥")
-                            raise ValueError("Alpha Vantage API密钥未配置")
-                        
-                        # 调用Alpha Vantage API获取当前价格和52周高低
-                        alpha_vantage_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={alpha_vantage_api_key}"
-                        alpha_vantage_response = requests.get(alpha_vantage_url, timeout=5)
-                        alpha_vantage_response.raise_for_status()
-                        alpha_vantage_data = alpha_vantage_response.json()
-                        
-                        global_quote = alpha_vantage_data.get("Global Quote", {})
-                        current_price = global_quote.get("05. price")
-                        year_low = global_quote.get("52. week low")
-                        year_high = global_quote.get("52. week high")
-                        
-                        if current_price:
-                            # 转换数据类型
-                            current_price = float(current_price)
-                            year_low = float(year_low) if year_low else None
-                            year_high = float(year_high) if year_high else None
-                            
-                            new_market_data[ticker] = {
-                                "current_price": current_price,
-                                "year_low": year_low,
-                                "year_high": year_high
-                            }
-                            print(f"使用Alpha Vantage API成功获取{ticker}的行情数据: {new_market_data[ticker]}")
-                        else:
-                            raise ValueError("Alpha Vantage API未返回有效数据")
-                            
-                    except Exception as alpha_vantage_error:
-                        print(f"Alpha Vantage API获取行情数据失败: {alpha_vantage_error}")
-                        # 不使用默认值，只记录错误
-                        new_market_data[ticker] = {
-                            "current_price": None,
-                            "year_low": None,
-                            "year_high": None
-                        }
+    # 保存完整的数据到缓存
+    save_generic_cache(cache_key, new_market_data)
+    print(f"已保存行情数据到缓存，共{len(new_market_data)}个股票")
+    
+    return new_market_data
     
     # 保存完整的数据到缓存
     save_generic_cache(cache_key, new_market_data)
