@@ -8,6 +8,7 @@ import datetime
 from io import StringIO
 import json
 import time
+import random
 from deep_translator import GoogleTranslator
 
 # 设置页面配置
@@ -106,6 +107,12 @@ def analyze_stocks(tickers):
     total = len(tickers)
     processed_count = 0
     
+    # 定义周期性行业列表 (根据 GICS 标准简化)
+    CYCLICAL_SECTORS = [
+        "Energy", "Materials", "Industrials", "Consumer Discretionary", "Financials", "Real Estate",
+        "Basic Materials", "Financial Services", "Consumer Cyclical" # yfinance 可能返回的行业名称
+    ]
+
     def process_ticker(ticker):
         try:
             stock = yf.Ticker(ticker)
@@ -136,6 +143,10 @@ def analyze_stocks(tickers):
             pe = info.get('trailingPE', 0)
             if pe is None or pe <= 0 or pe > 35: # 放宽到35
                 return None
+
+            # 判断是否为周期股
+            sector = info.get('sector', 'Unknown')
+            is_cyclical = sector in CYCLICAL_SECTORS
             
             return {
                 '代码': ticker,
@@ -150,7 +161,9 @@ def analyze_stocks(tickers):
                 '毛利率(%)': round(gross_margins * 100, 2),
                 '市值(亿)': round(info.get('marketCap', 0) / 100000000, 2),
                 '行业': info.get('industry', '未知'),
-                '中文行业': info.get('industry', '未知') # 稍后批量翻译
+                '板块': sector, # 新增板块字段用于判断
+                '中文行业': info.get('industry', '未知'), # 稍后批量翻译
+                '周期股': '⚠️是' if is_cyclical else '否'
             }
         except Exception:
             return None
@@ -251,13 +264,24 @@ def main():
         with c1:
              st.caption(f"📅 上次统计: {st.session_state.last_updated}{count_str}")
         with c2:
-             with st.expander("查看筛选标准", expanded=False):
+             with st.expander("查看筛选标准与指标解读", expanded=False):
                 st.markdown("""
                 **筛选标准：**
                 1. **高ROE**：净资产收益率 > 15%
                 2. **低负债**：债务权益比 < 150%
                 3. **高毛利**：毛利率 > 40%
                 4. **合理估值**：市盈率(PE) < 35
+                
+                ---
+                **🎓 指标小课堂：ROE (净资产收益率)**
+                *   **高 ROE (>15-20%)**：说明公司用股东的钱赚钱能力很强。通常意味着公司有独特的竞争优势（护城河），比如强大的品牌（可口可乐）、专利技术（医药股）或网络效应（Visa）。
+                *   **低 ROE (<10%)**：公司赚钱效率低，资金利用率不高。
+                *   **⚠️ 陷阱**：如果 ROE 突然极高 (>40%)，要警惕是否是因为公司大举借债（提高了杠杆）或变卖了资产（一次性收益），这种高 ROE 不可持续。
+                
+                **🔄 关于周期股**
+                *   表格中标记为“⚠️是”的属于周期性行业（如能源、原材料、金融）。
+                *   **特点**：在经济繁荣时业绩极好（低PE、高ROE），经济衰退时业绩极差。
+                *   **注意**：对于周期股，低市盈率往往是**卖出**信号（行业见顶），高市盈率往往是**买入**信号（行业见底）。请谨慎投资！
                 """)
     else:
         st.caption("尚未获取数据")
@@ -319,8 +343,9 @@ def main():
                     "毛利率(%)": st.column_config.NumberColumn("毛利率", format="%.2f%%"),
                     "市值(亿)": st.column_config.NumberColumn("市值($亿)", format="$%.2f"),
                     "中文行业": "行业",
+                    "周期股": st.column_config.TextColumn("周期性?", help="周期性行业通常随经济周期波动较大"),
                 },
-                column_order=["代码", "中文名称", "中文行业", "当前价格", "52周最高", "52周最低", "市盈率(PE)", "ROE(%)", "债务权益比(%)", "毛利率(%)", "市值(亿)"],
+                column_order=["代码", "中文名称", "周期股", "中文行业", "当前价格", "52周最高", "52周最低", "市盈率(PE)", "ROE(%)", "债务权益比(%)", "毛利率(%)", "市值(亿)"],
                 hide_index=True,
                 width='stretch',
                 height=700,
@@ -386,12 +411,98 @@ BUFFETT_HOLDINGS = {
     "LILAK": {"shares": 1284020, "cost": "未公开"}
 }
 
+@st.cache_data(ttl=604800, show_spinner=False) # 缓存7天
+def get_stock_details_cached(ticker):
+    # 增加随机延迟
+    time.sleep(random.uniform(0.1, 0.5))
+    
+    max_retries = 3
+    for i in range(max_retries):
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            # 简单的有效性检查
+            if info and 'currentPrice' in info:
+                return info
+        except Exception as e:
+            if i < max_retries - 1:
+                time.sleep(random.uniform(1, 3) * (i + 1))
+            else:
+                print(f"Failed to fetch details for {ticker}: {e}")
+                
+    # 尝试备用接口 (简单的页面请求测试)
+    try:
+        url = f"https://finance.yahoo.com/quote/{ticker}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            return {'__backup_mode__': True}
+    except Exception:
+        pass
+        
+    return None
+
+def get_industry_averages(industry):
+    if 'data' in st.session_state and st.session_state.data is not None:
+        df = st.session_state.data
+        # 筛选同行业
+        industry_df = df[df['行业'] == industry]
+        if not industry_df.empty:
+            avg_pe = industry_df['市盈率(PE)'].mean()
+            avg_roe = industry_df['ROE(%)'].mean()
+            avg_de = industry_df['债务权益比(%)'].mean()
+            avg_margin = industry_df['毛利率(%)'].mean()
+            return {
+                'avg_pe': f"{avg_pe:.2f}",
+                'avg_roe': f"{avg_roe:.2f}%",
+                'avg_de': f"{avg_de:.2f}%",
+                'avg_margin': f"{avg_margin:.2f}%"
+            }
+    return {}
+
 def show_stock_details(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        info = stock.info
+        # 1. 尝试获取详细信息 (带缓存)
+        info = get_stock_details_cached(ticker)
         
+        is_backup_mode = False
+        
+        # 2. 如果获取失败或处于备用模式，构造降级数据
+        if not info or info.get('__backup_mode__'):
+            is_backup_mode = True
+            # 从 session_state 中恢复数据
+            if 'data' in st.session_state and st.session_state.data is not None:
+                df = st.session_state.data
+                row = df[df['代码'] == ticker]
+                if not row.empty:
+                    row = row.iloc[0]
+                    # 构造基础 info 对象
+                    info = {
+                        'shortName': row.get('名称', ticker),
+                        'currentPrice': row.get('当前价格'),
+                        'fiftyTwoWeekHigh': row.get('52周最高'),
+                        'fiftyTwoWeekLow': row.get('52周最低'),
+                        'marketCap': row.get('市值(亿)', 0) * 100000000,
+                        'trailingPE': row.get('市盈率(PE)'),
+                        'returnOnEquity': row.get('ROE(%)') / 100, # 还原为小数
+                        'debtToEquity': row.get('债务权益比(%)'),
+                        'grossMargins': row.get('毛利率(%)') / 100, # 还原为小数
+                        'industry': row.get('行业'),
+                        'longBusinessSummary': '⚠️ 网络繁忙或API受限，当前显示为缓存的基础数据。详细简介暂时无法获取。',
+                        'dividendYield': None
+                    }
+                else:
+                    st.error("无法获取详情，且找不到缓存的基础数据。")
+                    return
+            else:
+                st.error("无法获取详情 (API Rate Limit)。")
+                return
+
         st.markdown(f"### {info.get('shortName')} ({ticker})")
+        if is_backup_mode:
+             st.warning("当前处于备用数据模式 (API限流保护)，仅显示核心数据。")
         
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -453,8 +564,25 @@ def show_stock_details(ticker):
         else:
             div_yield_str = "N/A"
 
+        # 计算行业均值
+        industry = info.get('industry')
+        avgs = get_industry_averages(industry) if industry else {}
+        
+        # 准备数据
+        roe = info.get('returnOnEquity')
+        roe_str = f"{roe * 100:.2f}%" if roe is not None else "N/A"
+        
+        de_ratio = info.get('debtToEquity')
+        de_str = f"{de_ratio:.2f}%" if de_ratio is not None else "N/A"
+        
+        gross_margins = info.get('grossMargins')
+        gm_str = f"{gross_margins * 100:.2f}%" if gross_margins is not None else "N/A"
+
         fin_data = {
-            "指标": ["总市值", "企业价值", "静态市盈率 (TTM)", "预测市盈率 (Forward)", "PEG 比率", "市净率 (P/B)", "股息率"],
+            "指标": [
+                "总市值", "企业价值", "静态市盈率 (TTM)", "预测市盈率 (Forward)", "PEG 比率", 
+                "市净率 (P/B)", "股息率", "ROE (净资产收益率)", "负债权益比 (负债率)", "毛利率"
+            ],
             "数值": [
                 f"${info.get('marketCap', 0):,}",
                 f"${info.get('enterpriseValue', 0):,}",
@@ -462,7 +590,14 @@ def show_stock_details(ticker):
                 str(info.get('forwardPE', 'N/A')),
                 str(info.get('pegRatio', 'N/A')),
                 str(info.get('priceToBook', 'N/A')),
-                div_yield_str
+                div_yield_str,
+                roe_str,
+                de_str,
+                gm_str
+            ],
+            "同榜行业均值 (仅供参考)": [
+                "", "", avgs.get('avg_pe', '-'), "", "", 
+                "", "", avgs.get('avg_roe', '-'), avgs.get('avg_de', '-'), avgs.get('avg_margin', '-')
             ]
         }
         st.table(pd.DataFrame(fin_data))
