@@ -134,9 +134,9 @@ def analyze_stocks(tickers):
             if de_ratio is None or de_ratio > 150: 
                 return None
                 
-            # 3. 毛利率 (Gross Margins) > 40% (可选，巴菲特喜欢高毛利)
+            # 3. 毛利率 (Gross Margins) > 20% (巴菲特喜欢高毛利，但40%过于严格，可能漏掉零售巨头如Costco，调整为20%)
             gross_margins = info.get('grossMargins', 0)
-            if gross_margins is None or gross_margins < 0.4:
+            if gross_margins is None or gross_margins < 0.2:
                 return None
                 
             # 4. 市盈率 (PE Ratio) > 0 且不过高
@@ -144,21 +144,87 @@ def analyze_stocks(tickers):
             if pe is None or pe <= 0 or pe > 35: # 放宽到35
                 return None
 
+            # 5. 自由现金流 (Free Cash Flow) > 0 (真金白银)
+            # 注意：yfinance 的 key 是 freeCashflow (全小写 flow)，不是 freeCashFlow
+            fcf = info.get('freeCashflow')
+            if fcf is None:
+                # 尝试手动计算: 经营现金流 - 资本开支
+                ocf = info.get('operatingCashflow')
+                capex = info.get('capitalExpenditures') # 通常是负数
+                if ocf is not None and capex is not None:
+                    fcf = ocf + capex # capex 是负数，所以相加
+                else:
+                    fcf = 0 # 无法获取，默认为0，避免报错，但可能漏掉好公司
+            
+            if fcf < 0:
+                return None
+
+            # 6. 净利率 (Profit Margins) > 10% (最终赚钱能力)
+            net_margin = info.get('profitMargins', 0)
+            if net_margin is None or net_margin < 0.1:
+                return None
+
+            # 7. 营收增长率 (Revenue Growth) > 0 (确保未衰退)
+            rev_growth = info.get('revenueGrowth', 0)
+            # 考虑到短期波动，暂时不作为硬性剔除标准，仅作为展示，或者放宽到 -5% 以防误杀
+            # 这里暂时不做硬性过滤，只获取数据
+
             # 判断是否为周期股
             sector = info.get('sector', 'Unknown')
             is_cyclical = sector in CYCLICAL_SECTORS
             
+            # 判断估值状态
+            valuation_status = "未知"
+            peg = info.get('pegRatio')
+            
+            # 如果没有 PEG，尝试根据 PE 和 增长率估算 (PEG = PE / (GrowthRate * 100))
+            if peg is None:
+                pe_val = info.get('trailingPE')
+                growth_val = info.get('earningsGrowth') # 预估增长率
+                if pe_val is not None and growth_val is not None and growth_val > 0:
+                    peg = pe_val / (growth_val * 100)
+            
+            # revenueGrowth 是小数，例如 0.05 表示 5%
+            # 优先判断衰退，再判断估值
+            if rev_growth is not None and rev_growth < 0:
+                valuation_status = "📉 衰退" # 营收负增长
+            elif peg is not None:
+                if peg < 1.0 and rev_growth > 0:
+                    valuation_status = "💰 低估" # PEG < 1 且有增长
+                elif 1.0 <= peg <= 2.0 and rev_growth > 0:
+                    valuation_status = "⚖️ 合理" # 1 <= PEG <= 2
+                elif peg > 2.0 and rev_growth > 0:
+                    valuation_status = "🏔️ 高估" # PEG > 2
+            
+            # 构建合并显示列
+            range_52 = f"${info.get('fiftyTwoWeekLow', 0)} - ${info.get('fiftyTwoWeekHigh', 0)}"
+            
+            pe_display = f"{round(pe, 2)}"
+            roe_display = f"{round(roe * 100, 2)}%"
+            pe_roe_merged = f"PE:{pe_display} | ROE:{roe_display}"
+            
+            debt_display = f"{de_ratio}%"
+            margin_display = f"{round(gross_margins * 100, 2)}%"
+            debt_margin_merged = f"负债:{debt_display} | 毛利:{margin_display}"
+
             return {
                 '代码': ticker,
                 '名称': info.get('shortName', ticker),
                 '中文名称': info.get('shortName', ticker), # 稍后批量翻译
+                '估值状态': valuation_status,
                 '当前价格': info.get('currentPrice', 0),
                 '52周最高': info.get('fiftyTwoWeekHigh', 0),
                 '52周最低': info.get('fiftyTwoWeekLow', 0),
+                '52周范围': range_52,
+                'PE/ROE': pe_roe_merged,
+                '负债/毛利': debt_margin_merged,
                 '市盈率(PE)': round(pe, 2),
+                'PEG': round(peg, 2) if peg is not None else 0,
                 'ROE(%)': round(roe * 100, 2),
                 '债务权益比(%)': de_ratio,
                 '毛利率(%)': round(gross_margins * 100, 2),
+                '净利率(%)': round(net_margin * 100, 2),
+                '自由现金流(亿)': round(fcf / 100000000, 2) if fcf is not None else 0,
                 '市值(亿)': round(info.get('marketCap', 0) / 100000000, 2),
                 '行业': info.get('industry', '未知'),
                 '板块': sector, # 新增板块字段用于判断
@@ -168,14 +234,17 @@ def analyze_stocks(tickers):
                 'longBusinessSummary': info.get('longBusinessSummary', '暂无简介'),
                 'enterpriseValue': info.get('enterpriseValue', 0),
                 'forwardPE': info.get('forwardPE', 0),
-                'pegRatio': info.get('pegRatio', 0),
+                'pegRatio': peg if peg is not None else 0,
                 'priceToBook': info.get('priceToBook', 0),
                 'dividendYield': info.get('dividendYield', 0),
                 'marketCap': info.get('marketCap', 0),
                 'trailingPE': info.get('trailingPE', 0),
                 'returnOnEquity': info.get('returnOnEquity', 0),
                 'debtToEquity': info.get('debtToEquity', 0),
-                'grossMargins': info.get('grossMargins', 0)
+                'grossMargins': info.get('grossMargins', 0),
+                'profitMargins': info.get('profitMargins', 0),
+                'freeCashFlow': fcf if fcf is not None else 0,
+                'revenueGrowth': info.get('revenueGrowth', 0)
             }
         except Exception:
             return None
@@ -207,9 +276,14 @@ def analyze_stocks(tickers):
             
         # 应用翻译
         for stock in selected_stocks:
-            stock['中文行业'] = industry_map.get(stock['行业'], stock['行业'])
+            cn_industry = industry_map.get(stock['行业'], stock['行业'])
+            stock['中文行业'] = cn_industry
             # 公司名称逐个翻译，稍微慢点
-            stock['中文名称'] = translate_text(stock['名称'])
+            cn_name = translate_text(stock['名称'])
+            stock['中文名称'] = cn_name
+            
+            # 合并 公司名称 和 行业
+            stock['公司/行业'] = f"{cn_name} | {cn_industry}"
 
     status_text.text("分析完成！")
     progress_bar.empty()
@@ -222,6 +296,14 @@ def main():
     if 'data' not in st.session_state:
         # 尝试加载缓存
         cached_df, last_updated = load_cache()
+        
+        # 检查缓存是否包含新添加的列，如果不包含则失效
+        if cached_df is not None:
+            required_cols = ['PEG', '净利率(%)', '自由现金流(亿)', '估值状态', '52周范围', 'PE/ROE', '负债/毛利', '公司/行业']
+            if not all(col in cached_df.columns for col in required_cols):
+                cached_df = None
+                last_updated = None
+                
         if cached_df is not None:
             st.session_state.data = cached_df
             st.session_state.last_updated = last_updated
@@ -281,14 +363,17 @@ def main():
                 **筛选标准：**
                 1. **高ROE**：净资产收益率 > 15%
                 2. **低负债**：债务权益比 < 150%
-                3. **高毛利**：毛利率 > 40%
+                3. **高毛利**：毛利率 > 20% (原40%，适度放宽以包容零售/高周转行业)
                 4. **合理估值**：市盈率(PE) < 35
+                5. **真金白银**：自由现金流 > 0 (新增)
+                6. **最终赚钱**：净利率 > 10% (新增)
                 
                 ---
-                **🎓 指标小课堂：ROE (净资产收益率)**
-                *   **高 ROE (>15-20%)**：说明公司用股东的钱赚钱能力很强。通常意味着公司有独特的竞争优势（护城河），比如强大的品牌（可口可乐）、专利技术（医药股）或网络效应（Visa）。
-                *   **低 ROE (<10%)**：公司赚钱效率低，资金利用率不高。
-                *   **⚠️ 陷阱**：如果 ROE 突然极高 (>40%)，要警惕是否是因为公司大举借债（提高了杠杆）或变卖了资产（一次性收益），这种高 ROE 不可持续。
+                **🎓 指标小课堂**
+                *   **PEG (市盈率/增长比)**：< 1 为低估，< 2 为合理。弥补了单纯看PE的缺陷，考虑了成长性。
+                *   **FCF (自由现金流)**：公司真正能自由支配的现金。巴菲特最看重的“所有者盈余”。
+                *   **净利率 (Net Margin)**：扣除所有成本（含税、利息）后剩下的钱。比毛利率更能反映最终盈利能力。
+                *   **ROE (净资产收益率)**：>15% 说明公司用股东的钱赚钱能力很强。
                 
                 **🔄 关于周期股**
                 *   表格中标记为“⚠️是”的属于周期性行业（如能源、原材料、金融）。
@@ -348,28 +433,28 @@ def main():
             # 绿色: ROE, 毛利率 (盈利能力)
             # 红色: 负债率 (风险)
             
-            styled_df = df.style.map(lambda x: 'color: #2962FF; font-weight: 500;', subset=['当前价格', '52周最高', '52周最低', '市值(亿)']) \
-                                .map(lambda x: 'color: #6200EA; font-weight: 500;', subset=['市盈率(PE)']) \
-                                .map(lambda x: 'color: #00C853; font-weight: 500;', subset=['ROE(%)', '毛利率(%)']) \
-                                .map(lambda x: 'color: #D50000; font-weight: 500;', subset=['债务权益比(%)'])
+            styled_df = df.style.applymap(lambda x: 'color: #2962FF; font-weight: 500;', subset=['当前价格', '52周最高', '52周最低', '市值(亿)', '自由现金流(亿)']) \
+                                .applymap(lambda x: 'color: #6200EA; font-weight: 500;', subset=['市盈率(PE)', 'PEG']) \
+                                .applymap(lambda x: 'color: #00C853; font-weight: 500;', subset=['ROE(%)', '毛利率(%)', '净利率(%)']) \
+                                .applymap(lambda x: 'color: #D50000; font-weight: 500;', subset=['债务权益比(%)'])
             
             event = st.dataframe(
                 styled_df,
                 column_config={
                     "代码": "股票代码",
-                    "中文名称": "公司名称",
+                    "公司/行业": st.column_config.TextColumn("公司 | 行业", width="medium"),
+                    "估值状态": st.column_config.TextColumn("估值状态", help="基于PEG和营收增长判断：\n💰 低估：PEG < 1\n⚖️ 合理：1 < PEG < 2\n🏔️ 高估：PEG > 2\n📉 衰退：营收负增长"),
                     "当前价格": st.column_config.NumberColumn("价格($)", format="$%.2f"),
-                    "52周最高": st.column_config.NumberColumn("52周最高", format="$%.2f"),
-                    "52周最低": st.column_config.NumberColumn("52周最低", format="$%.2f"),
-                    "市盈率(PE)": st.column_config.NumberColumn("PE", format="%.2f"),
-                    "ROE(%)": st.column_config.NumberColumn("ROE", format="%.2f%%"),
-                    "债务权益比(%)": st.column_config.NumberColumn("负债率", format="%.2f%%"),
-                    "毛利率(%)": st.column_config.NumberColumn("毛利率", format="%.2f%%"),
+                    "52周范围": st.column_config.TextColumn("52周范围 (低 - 高)", width="medium"),
+                    "PE/ROE": st.column_config.TextColumn("PE | ROE", width="medium"),
+                    "PEG": st.column_config.NumberColumn("PEG", format="%.2f", help="市盈率相对盈利增长比率，<1通常为低估"),
+                    "负债/毛利": st.column_config.TextColumn("负债 | 毛利", width="medium"),
+                    "净利率(%)": st.column_config.NumberColumn("净利率", format="%.2f%%", help="净利润占营收的比例"),
+                    "自由现金流(亿)": st.column_config.NumberColumn("FCF(亿)", format="$%.2f", help="自由现金流：巴菲特最看重的真金白银"),
                     "市值(亿)": st.column_config.NumberColumn("市值($亿)", format="$%.2f"),
-                    "中文行业": "行业",
                     "周期股": st.column_config.TextColumn("周期性?", help="周期性行业通常随经济周期波动较大"),
                 },
-                column_order=["代码", "中文名称", "周期股", "中文行业", "当前价格", "52周最高", "52周最低", "市盈率(PE)", "ROE(%)", "债务权益比(%)", "毛利率(%)", "市值(亿)"],
+                column_order=["代码", "公司/行业", "估值状态", "周期股", "当前价格", "52周范围", "PE/ROE", "PEG", "负债/毛利", "净利率(%)", "自由现金流(亿)", "市值(亿)"],
                 hide_index=True,
                 width='stretch',
                 height=700,
