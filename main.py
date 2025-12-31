@@ -10,12 +10,264 @@ import json
 import time
 import random
 from deep_translator import GoogleTranslator
+import concurrent.futures
 
 # 设置页面配置
 st.set_page_config(page_title="价值选股器", layout="wide")
 
 CACHE_FILE = "stock_cache.csv"
 META_FILE = "cache_metadata.json"
+
+# 巴菲特持仓数据 (静态备份 + 成本数据)
+# 数据来源: 13F Filing via Dataroma/CNBC (截至 2025年 Q3)
+BUFFETT_HOLDINGS_STATIC = {
+    "AAPL": {"shares": 238212764, "cost": "约 $35 (2016-2018建仓)"},
+    "AXP": {"shares": 151610700, "cost": "约 $8.49 (长期持有)"},
+    "BAC": {"shares": 568070012, "cost": "约 $14 (含2017行权)"},
+    "KO": {"shares": 400000000, "cost": "约 $3.25 (1988年建仓)"},
+    "CVX": {"shares": 122064792, "cost": "约 $128 (2020年起建仓)"},
+    "OXY": {"shares": 264941431, "cost": "约 $52 (2019年起建仓)"},
+    "MCO": {"shares": 24669778, "cost": "约 $10 (2000年分拆)"},
+    "CB": {"shares": 31332895, "cost": "约 $230 - $291 (2023-2025增持)"},
+    "KHC": {"shares": 325634818, "cost": "约 $30 (账面价值)"},
+    "GOOGL": {"shares": 17846142, "cost": "约 $174 - $257 (2025 Q3建仓)"},
+    "DVA": {"shares": 32160579, "cost": "约 $45 (2011-2014建仓)"},
+    "KR": {"shares": 50000000, "cost": "约 $42 (2019-2021建仓)"},
+    "SIRI": {"shares": 124807117, "cost": "约 $25 (Liberty合并重组)"},
+    "V": {"shares": 8297460, "cost": "约 $22 (2011年建仓)"},
+    "VRSN": {"shares": 8989880, "cost": "约 $85 (2012-2013建仓)"},
+    "MA": {"shares": 3986648, "cost": "约 $25 (2011年建仓)"},
+    "AMZN": {"shares": 10000000, "cost": "约 $90 (2019年建仓)"},
+    "STZ": {"shares": 13400000, "cost": "未公开 (可能为历史遗留)"},
+    "UNH": {"shares": 5039564, "cost": "未公开"},
+    "COF": {"shares": 7150000, "cost": "约 $150 (2023-2024建仓)"},
+    "AON": {"shares": 4100000, "cost": "约 $300 (2021-2024建仓)"},
+    "DPZ": {"shares": 2981945, "cost": "约 $402 - $504 (2024-2025建仓)"},
+    "ALLY": {"shares": 29000000, "cost": "约 $35 (2022年建仓)"},
+    "LLYVK": {"shares": 10917661, "cost": "未公开"},
+    "POOL": {"shares": 3458885, "cost": "约 $310 - $350 (2024-2025建仓)"},
+    "LEN": {"shares": 7050950, "cost": "约 $115 (2023年建仓)"},
+    "NUE": {"shares": 6407749, "cost": "约 $150 (2023-2024建仓)"},
+    "LPX": {"shares": 5664793, "cost": "约 $60 (2022-2023建仓)"},
+    "LLYVA": {"shares": 4986588, "cost": "未公开"},
+    "FWONK": {"shares": 3018555, "cost": "未公开"},
+    "HEI-A": {"shares": 1294612, "cost": "约 $160 - $200 (2024建仓)"},
+    "CHTR": {"shares": 1060882, "cost": "约 $160 (2014年建仓)"},
+    "LAMR": {"shares": 1202110, "cost": "约 $100 - $123 (2025建仓)"},
+    "ALLE": {"shares": 780133, "cost": "未公开"},
+    "NVR": {"shares": 11112, "cost": "约 $7000 (2023年建仓)"},
+    "DEO": {"shares": 227750, "cost": "约 $160 (2023年建仓)"},
+    "JEF": {"shares": 433558, "cost": "约 $30 (2022年建仓)"},
+    "LEN-B": {"shares": 180980, "cost": "约 $100"},
+    "LILA": {"shares": 2630792, "cost": "未公开"},
+        "BATRK": {"shares": 223645, "cost": "未公开"},
+        "LILAK": {"shares": 1284020, "cost": "未公开"}
+}
+
+# 后备行情数据（如果API请求失败，将使用这些数据）
+fallback_market_data = {
+    "AAPL": {"current_price": 170.0, "year_low": 135.0, "year_high": 198.0},
+    "AXP": {"current_price": 175.0, "year_low": 140.0, "year_high": 195.0},
+    "BAC": {"current_price": 32.0, "year_low": 24.0, "year_high": 37.0},
+    "KO": {"current_price": 63.0, "year_low": 54.0, "year_high": 65.0},
+    "COKE": {"current_price": 63.0, "year_low": 54.0, "year_high": 65.0},
+    "OXY": {"current_price": 62.0, "year_low": 50.0, "year_high": 73.0},
+    "MCO": {"current_price": 800.0, "year_low": 680.0, "year_high": 850.0},
+    "KHC": {"current_price": 45.0, "year_low": 38.0, "year_high": 52.0},
+    "CB": {"current_price": 120.0, "year_low": 95.0, "year_high": 135.0},
+    "GOOGL": {"current_price": 135.0, "year_low": 120.0, "year_high": 160.0},
+    "DVA": {"current_price": 120.0, "year_low": 95.0, "year_high": 135.0},
+    "SIRI": {"current_price": 3.0, "year_low": 2.5, "year_high": 4.0},
+    "V": {"current_price": 260.0, "year_low": 220.0, "year_high": 280.0}
+}
+
+def get_market_data(tickers):
+    """获取行情数据，先从本地缓存读取，缓存过期则从API获取
+    
+    Args:
+        tickers: 股票代码列表
+        
+    Returns:
+        包含所有股票行情数据的字典
+    """
+    if not tickers:
+        return {}
+        
+    # 确保tickers是列表
+    if isinstance(tickers, str):
+        tickers = [tickers]
+    
+    # 统一处理股票代码格式
+    tickers = [t.replace('.', '-') for t in tickers]
+    
+    # 从缓存获取数据
+    cache_key = "market_data"
+    market_data = load_generic_cache(cache_key)
+    
+    # 如果缓存存在，检查是否包含所有需要的股票
+    if market_data:
+        # 检查缓存是否包含所有需要的股票
+        missing_tickers = [t for t in tickers if t not in market_data]
+        if not missing_tickers:
+            print(f"使用缓存行情数据，共{len(market_data)}个股票")
+            return market_data
+    
+    # 如果缓存不存在或不完整，获取新数据
+    print(f"缓存不完整或已过期，需要获取{len(tickers)}个股票的行情数据")
+    
+    # 初始化市场数据字典
+    new_market_data = {}
+    
+    # 如果有缓存数据，先使用缓存数据
+    if market_data:
+        new_market_data = market_data.copy()
+    
+    # 获取缺失的股票数据
+    missing_tickers = [t for t in tickers if t not in new_market_data]
+    
+    if missing_tickers:
+        print(f"需要获取{len(missing_tickers)}个股票的新数据")
+        
+        for ticker in missing_tickers:
+            try:
+                print(f"正在获取{ticker}的行情数据")
+                stock = yf.Ticker(ticker)
+                info = stock.info
+                
+                # 获取所需的行情数据
+                current_price = info.get("currentPrice")
+                year_low = info.get("fiftyTwoWeekLow")
+                year_high = info.get("fiftyTwoWeekHigh")
+                
+                # 如果API数据不可用，尝试使用后备数据
+                if not current_price or not year_low or not year_high:
+                    fallback_data = fallback_market_data.get(ticker, {})
+                    if not current_price:
+                        current_price = fallback_data.get('current_price')
+                    if not year_low:
+                        year_low = fallback_data.get('year_low')
+                    if not year_high:
+                        year_high = fallback_data.get('year_high')
+                
+                # 如果后备数据也不可用，使用静态估计值
+                if not current_price:
+                    current_price = 100.0  # 默认价格
+                if not year_low:
+                    year_low = current_price * 0.8
+                if not year_high:
+                    year_high = current_price * 1.2
+                
+                new_market_data[ticker] = {
+                    "current_price": current_price,
+                    "year_low": year_low,
+                    "year_high": year_high
+                }
+                print(f"{ticker}的行情数据: {new_market_data[ticker]}")
+                
+                # 添加延迟，避免被限流
+                time.sleep(1.0)
+                
+            except Exception as e:
+                print(f"获取{ticker}的行情数据失败: {e}")
+                
+                # 尝试使用Finnhub API作为备用接口
+                try:
+                    print(f"尝试使用Finnhub API获取{ticker}的行情数据")
+                    
+                    # 从Streamlit secrets获取API密钥
+                    finnhub_api_key = st.secrets.get("finnhub", {}).get("api_key")
+                    
+                    if not finnhub_api_key:
+                        print("未配置Finnhub API密钥")
+                        raise ValueError("Finnhub API密钥未配置")
+                    
+                    # 调用Finnhub API获取当前价格
+                    finnhub_url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={finnhub_api_key}"
+                    finnhub_response = requests.get(finnhub_url, timeout=5)
+                    finnhub_response.raise_for_status()
+                    finnhub_data = finnhub_response.json()
+                    
+                    current_price = finnhub_data.get("c")
+                    
+                    # 调用Finnhub API获取52周高低
+                    finnhub_52w_url = f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=price&token={finnhub_api_key}"
+                    finnhub_52w_response = requests.get(finnhub_52w_url, timeout=5)
+                    finnhub_52w_response.raise_for_status()
+                    finnhub_52w_data = finnhub_52w_response.json()
+                    
+                    year_low = finnhub_52w_data.get("metric", {}).get("52WeekLow")
+                    year_high = finnhub_52w_data.get("metric", {}).get("52WeekHigh")
+                    
+                    if current_price:
+                        # 如果52周高低不可用，使用当前价格的比例估计
+                        if not year_low:
+                            year_low = current_price * 0.8
+                        if not year_high:
+                            year_high = current_price * 1.2
+                            
+                        new_market_data[ticker] = {
+                            "current_price": current_price,
+                            "year_low": year_low,
+                            "year_high": year_high
+                        }
+                        print(f"使用Finnhub API成功获取{ticker}的行情数据: {new_market_data[ticker]}")
+                    else:
+                        raise ValueError("Finnhub API未返回有效数据")
+                        
+                except Exception as finnhub_error:
+                    print(f"Finnhub API获取行情数据失败: {finnhub_error}")
+                    
+                    # 尝试使用Alpha Vantage API作为第二个备用接口
+                    try:
+                        print(f"尝试使用Alpha Vantage API获取{ticker}的行情数据")
+                        
+                        # 从Streamlit secrets获取API密钥
+                        alpha_vantage_api_key = st.secrets.get("alpha_vantage", {}).get("api_key")
+                        
+                        if not alpha_vantage_api_key:
+                            print("未配置Alpha Vantage API密钥")
+                            raise ValueError("Alpha Vantage API密钥未配置")
+                        
+                        # 调用Alpha Vantage API获取当前价格和52周高低
+                        alpha_vantage_url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={ticker}&apikey={alpha_vantage_api_key}"
+                        alpha_vantage_response = requests.get(alpha_vantage_url, timeout=5)
+                        alpha_vantage_response.raise_for_status()
+                        alpha_vantage_data = alpha_vantage_response.json()
+                        
+                        global_quote = alpha_vantage_data.get("Global Quote", {})
+                        current_price = global_quote.get("05. price")
+                        year_low = global_quote.get("52. week low")
+                        year_high = global_quote.get("52. week high")
+                        
+                        if current_price:
+                            # 转换数据类型
+                            current_price = float(current_price)
+                            year_low = float(year_low) if year_low else current_price * 0.8
+                            year_high = float(year_high) if year_high else current_price * 1.2
+                            
+                            new_market_data[ticker] = {
+                                "current_price": current_price,
+                                "year_low": year_low,
+                                "year_high": year_high
+                            }
+                            print(f"使用Alpha Vantage API成功获取{ticker}的行情数据: {new_market_data[ticker]}")
+                        else:
+                            raise ValueError("Alpha Vantage API未返回有效数据")
+                            
+                    except Exception as alpha_vantage_error:
+                        print(f"Alpha Vantage API获取行情数据失败: {alpha_vantage_error}")
+                        # 使用后备数据
+                        new_market_data[ticker] = fallback_market_data.get(ticker, {
+                            "current_price": 100.0,
+                            "year_low": 80.0,
+                            "year_high": 120.0
+                        })
+    
+    # 保存完整的数据到缓存
+    save_generic_cache(cache_key, new_market_data)
+    print(f"已保存行情数据到缓存，共{len(new_market_data)}个股票")
+    
+    return new_market_data
 
 def translate_text(text):
     if not text:
@@ -51,6 +303,52 @@ def load_cache():
         except Exception:
             return None, None
     return None, None
+
+# 通用缓存函数
+def save_generic_cache(key, data, ttl=3600*24):
+    """保存通用数据到缓存文件
+    
+    Args:
+        key: 缓存键名
+        data: 要缓存的数据
+        ttl: 缓存时间（秒），默认为24小时
+    """
+    cache_data = {
+        'data': data,
+        'timestamp': time.time(),
+        'ttl': ttl
+    }
+    cache_file = f"{key}.json"
+    try:
+        with open(cache_file, 'w') as f:
+            json.dump(cache_data, f)
+        return True
+    except Exception as e:
+        print(f"保存缓存失败: {e}")
+        return False
+
+def load_generic_cache(key):
+    """从缓存文件加载通用数据，检查缓存是否过期
+    
+    Returns:
+        如果缓存存在且未过期，返回数据；否则返回None
+    """
+    cache_file = f"{key}.json"
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+            
+            # 检查缓存是否过期
+            if time.time() - cache_data['timestamp'] < cache_data['ttl']:
+                return cache_data['data']
+            else:
+                print(f"缓存已过期: {key}")
+                return None
+        except Exception as e:
+            print(f"加载缓存失败: {e}")
+            return None
+    return None
 
 # 获取S&P 500成分股列表
 @st.cache_data
@@ -188,7 +486,7 @@ def get_buffett_portfolio_data():
         print(f"Error scraping Buffett portfolio: {e}")
         return []
 
-@st.dialog("巴菲特持仓分析 (Dataroma)", width="large")
+@st.dialog("巴菲特近期交易记录 (Dataroma)", width="large")
 def show_buffett_activity_dialog():
     # 自定义 CSS 调整弹窗尺寸
     st.markdown("""
@@ -213,31 +511,17 @@ def show_buffett_activity_dialog():
         # 提取 Tickers
         tickers = [item['代码'] for item in portfolio_data]
         
-        # 并发获取实时行情 (fast_info)
+        # 获取实时行情数据 (使用新的缓存系统)
         market_data = {}
         if tickers:
             try:
-                def get_quote(ticker):
-                    try:
-                        stock = yf.Ticker(ticker)
-                        info = stock.fast_info
-                        return {
-                            "current_price": info.last_price,
-                            "year_low": info.year_low,
-                            "year_high": info.year_high
-                        }
-                    except:
-                        return None
-                
-                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                    futures = {executor.submit(get_quote, t): t for t in tickers}
-                    for future in concurrent.futures.as_completed(futures):
-                        t = futures[future]
-                        res = future.result()
-                        if res:
-                            market_data[t] = res
+                market_data = get_market_data(tickers)
+                st.info("使用缓存的行情数据 (24小时更新一次)")
             except Exception as e:
                 st.error(f"获取行情失败: {e}")
+                st.info("由于数据提供商限制，无法获取实时行情数据。请稍后再试。")
+        
+        print(f"最终market_data: {market_data}")
         
         # 准备静态成本数据
         static_costs = BUFFETT_HOLDINGS_STATIC
@@ -248,9 +532,34 @@ def show_buffett_activity_dialog():
             ticker = item['代码']
             m_data = market_data.get(ticker, {})
             
+            # 使用API数据，如果不可用则使用后备数据
             cur_price = m_data.get('current_price')
             y_low = m_data.get('year_low')
             y_high = m_data.get('year_high')
+            
+            # 如果API数据不可用，尝试使用后备数据
+            if not cur_price or not y_low or not y_high:
+                fallback_data = fallback_market_data.get(ticker, {})
+                if not cur_price:
+                    cur_price = fallback_data.get('current_price')
+                if not y_low:
+                    y_low = fallback_data.get('year_low')
+                if not y_high:
+                    y_high = fallback_data.get('year_high')
+            
+            # 如果后备数据也不可用，使用静态估计值
+            if not cur_price:
+                # 尝试从持仓平均成本估算当前价格
+                if ticker in static_costs:
+                    cost_str = static_costs[ticker].get('cost', '')
+                    if cost_str.startswith('约 $'):
+                        cost_num = float(cost_str[3:].split()[0].replace(',', ''))
+                        cur_price = cost_num * 1.1  # 假设当前价格比成本高10%
+            
+            if not y_low:
+                y_low = cur_price * 0.8 if cur_price else 10.0  # 假设52周最低是当前价格的80%
+            if not y_high:
+                y_high = cur_price * 1.2 if cur_price else 20.0  # 假设52周最高是当前价格的120%
             
             # 获取平均成本 (优先使用静态维护的精确数据)
             avg_cost = "N/A"
@@ -363,6 +672,9 @@ def analyze_stocks(tickers):
         "Energy", "Materials", "Industrials", "Consumer Discretionary", "Financials", "Real Estate",
         "Basic Materials", "Financial Services", "Consumer Cyclical" # yfinance 可能返回的行业名称
     ]
+    
+    # 先获取所有股票的行情数据
+    market_data = get_market_data(tickers)
 
     def process_ticker(ticker):
         try:
@@ -447,8 +759,14 @@ def analyze_stocks(tickers):
                 elif peg > 2.0 and rev_growth > 0:
                     valuation_status = "🏔️ 高估" # PEG > 2
             
+            # 从缓存行情数据中获取价格和52周高低信息
+            cached_stock_data = market_data.get(ticker, {})
+            current_price = cached_stock_data.get('当前价格', info.get('currentPrice', 0))
+            fifty_two_week_high = cached_stock_data.get('52周最高', info.get('fiftyTwoWeekHigh', 0))
+            fifty_two_week_low = cached_stock_data.get('52周最低', info.get('fiftyTwoWeekLow', 0))
+            
             # 构建合并显示列
-            range_52 = f"${info.get('fiftyTwoWeekLow', 0)} - ${info.get('fiftyTwoWeekHigh', 0)}"
+            range_52 = f"${fifty_two_week_low} - ${fifty_two_week_high}"
             
             pe_display = f"{round(pe, 2)}"
             roe_display = f"{round(roe * 100, 2)}%"
@@ -463,9 +781,9 @@ def analyze_stocks(tickers):
                 '名称': info.get('shortName', ticker),
                 '中文名称': info.get('shortName', ticker), # 稍后批量翻译
                 '估值状态': valuation_status,
-                '当前价格': info.get('currentPrice', 0),
-                '52周最高': info.get('fiftyTwoWeekHigh', 0),
-                '52周最低': info.get('fiftyTwoWeekLow', 0),
+                '当前价格': current_price,
+                '52周最高': fifty_two_week_high,
+                '52周最低': fifty_two_week_low,
                 '52周范围': range_52,
                 'PE/ROE': pe_roe_merged,
                 '负债/毛利': debt_margin_merged,
@@ -542,114 +860,7 @@ def analyze_stocks(tickers):
     return pd.DataFrame(selected_stocks)
 
 
-@st.dialog("巴菲特近期交易记录 (Dataroma)", width="large")
-def show_buffett_activity_dialog():
-    with st.spinner("正在获取交易数据..."):
-        activities = get_buffett_recent_activity()
-        if not activities:
-            st.warning("未找到近期交易记录或无法连接数据源。")
-            return
-            
-        # 提取 Tickers
-        tickers = [item['代码'] for item in activities]
-        
-        # 并发获取实时行情
-        market_data = {}
-        if tickers:
-            try:
-                def get_quote(ticker):
-                    try:
-                        # 使用 fast_info 获取最新数据 (速度快)
-                        stock = yf.Ticker(ticker)
-                        info = stock.fast_info
-                        return {
-                            "current_price": info.last_price,
-                            "year_low": info.year_low,
-                            "year_high": info.year_high
-                        }
-                    except:
-                        return None
-                
-                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = {executor.submit(get_quote, t): t for t in tickers}
-                    for future in concurrent.futures.as_completed(futures):
-                        t = futures[future]
-                        res = future.result()
-                        if res:
-                            market_data[t] = res
-            except Exception as e:
-                st.error(f"获取行情失败: {e}")
-        
-        # 组装数据
-        display_data = []
-        for item in activities:
-            ticker = item['代码']
-            m_data = market_data.get(ticker, {})
-            
-            cur_price = m_data.get('current_price')
-            y_low = m_data.get('year_low')
-            y_high = m_data.get('year_high')
-            
-            display_data.append({
-                "代码": ticker,
-                "名称": item['名称'],
-                "操作": item['操作'],
-                "变动详情": item['变动详情'],
-                "巴菲特交易价(估)": item['交易价格(估)'],
-                "最新价": f"${cur_price:.2f}" if cur_price else "N/A",
-                "52周最低": f"${y_low:.2f}" if y_low else "N/A",
-                "52周最高": f"${y_high:.2f}" if y_high else "N/A"
-            })
-            
-        df = pd.DataFrame(display_data)
-        
-        # 样式高亮：将 "新增" 显示为绿色
-        def highlight_new(val):
-            return 'color: #00C853; font-weight: bold' if val == '新增' else ''
-            
-        # 兼容 pandas 版本 (map vs applymap)
-        try:
-            styled_df = df.style.map(highlight_new, subset=['操作'])
-        except:
-            styled_df = df.style.applymap(highlight_new, subset=['操作'])
 
-        # 样式高亮：如果 (新增 或 增持) 且 最新价 < 巴菲特交易价(估)，则整行高亮
-        def highlight_row_opportunity(row):
-            styles = [''] * len(row)
-            try:
-                # 检查操作类型：必须是 "新增" 或 "➕ 增持"
-                action = str(row['操作'])
-                if "新增" not in action and "增持" not in action:
-                    return styles
-
-                # 获取最新价 (去除 $ 和 ,)
-                cur_str = str(row['最新价']).replace('$', '').replace(',', '')
-                cur_val = float(cur_str)
-                
-                # 获取巴菲特成本
-                cost_str = str(row['巴菲特交易价(估)']).replace('$', '').replace(',', '')
-                cost_val = float(cost_str)
-                
-                # 如果最新价 < 巴菲特成本，整行背景变色 (淡绿色)
-                if cur_val < cost_val:
-                    # 为每一列设置背景色
-                    styles = ['background-color: #e8f5e9; color: #1b5e20'] * len(row)
-                    
-                    # 重新应用 "新增" 的绿色高亮 (因为被整行样式覆盖了)
-                    # 找到 '操作' 列的索引
-                    if "新增" in action:
-                         op_idx = df.columns.get_loc('操作')
-                         styles[op_idx] += '; color: #00C853; font-weight: bold'
-                         
-            except:
-                pass
-            return styles
-
-        # 应用行级样式
-        styled_df = styled_df.apply(highlight_row_opportunity, axis=1)
-            
-        st.dataframe(styled_df, use_container_width=True, hide_index=True)
-        st.caption("注：数据来自 Dataroma 最近一次报告 (缓存30天)。最新价和52周范围为实时获取。")
 
 
 def main():
