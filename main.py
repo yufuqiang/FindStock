@@ -163,7 +163,19 @@ def analyze_stocks(tickers):
                 '行业': info.get('industry', '未知'),
                 '板块': sector, # 新增板块字段用于判断
                 '中文行业': info.get('industry', '未知'), # 稍后批量翻译
-                '周期股': '⚠️是' if is_cyclical else '否'
+                '周期股': '⚠️是' if is_cyclical else '否',
+                # 隐藏字段 (用于详情页备份)
+                'longBusinessSummary': info.get('longBusinessSummary', '暂无简介'),
+                'enterpriseValue': info.get('enterpriseValue', 0),
+                'forwardPE': info.get('forwardPE', 0),
+                'pegRatio': info.get('pegRatio', 0),
+                'priceToBook': info.get('priceToBook', 0),
+                'dividendYield': info.get('dividendYield', 0),
+                'marketCap': info.get('marketCap', 0),
+                'trailingPE': info.get('trailingPE', 0),
+                'returnOnEquity': info.get('returnOnEquity', 0),
+                'debtToEquity': info.get('debtToEquity', 0),
+                'grossMargins': info.get('grossMargins', 0)
             }
         except Exception:
             return None
@@ -329,8 +341,20 @@ def main():
             # 提示用户操作
             st.caption("💡 单击表格中的行查看详细信息（已按接近52周最低价排序）")
             
+            # 给数值列加上颜色样式
+            # 定义颜色映射
+            # 蓝色: 价格, 市值 (基本面规模)
+            # 紫色: PE (估值)
+            # 绿色: ROE, 毛利率 (盈利能力)
+            # 红色: 负债率 (风险)
+            
+            styled_df = df.style.map(lambda x: 'color: #2962FF; font-weight: 500;', subset=['当前价格', '52周最高', '52周最低', '市值(亿)']) \
+                                .map(lambda x: 'color: #6200EA; font-weight: 500;', subset=['市盈率(PE)']) \
+                                .map(lambda x: 'color: #00C853; font-weight: 500;', subset=['ROE(%)', '毛利率(%)']) \
+                                .map(lambda x: 'color: #D50000; font-weight: 500;', subset=['债务权益比(%)'])
+            
             event = st.dataframe(
-                df,
+                styled_df,
                 column_config={
                     "代码": "股票代码",
                     "中文名称": "公司名称",
@@ -360,8 +384,18 @@ def main():
                 selected_ticker = df.iloc[selected_index]['代码']
                 show_stock_details_dialog(selected_ticker)
 
-@st.dialog("股票详情")
+@st.dialog("股票详情", width="large")
 def show_stock_details_dialog(ticker):
+    # 自定义 CSS 来调整弹窗宽度
+    # width="large" 通常很宽，这里通过 max-width 限制在 900px 左右 (比默认 large 窄一些，比 small 宽很多)
+    st.markdown("""
+        <style>
+        div[role="dialog"][aria-modal="true"] {
+            width: 80vw !important;
+            max-width: 900px !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
     show_stock_details(ticker)
 
 
@@ -449,18 +483,28 @@ def get_industry_averages(industry):
         df = st.session_state.data
         # 筛选同行业
         industry_df = df[df['行业'] == industry]
+        count = len(industry_df)
         if not industry_df.empty:
             avg_pe = industry_df['市盈率(PE)'].mean()
             avg_roe = industry_df['ROE(%)'].mean()
             avg_de = industry_df['债务权益比(%)'].mean()
             avg_margin = industry_df['毛利率(%)'].mean()
             return {
+                'count': count,
                 'avg_pe': f"{avg_pe:.2f}",
                 'avg_roe': f"{avg_roe:.2f}%",
                 'avg_de': f"{avg_de:.2f}%",
                 'avg_margin': f"{avg_margin:.2f}%"
             }
-    return {}
+    return {'count': 0}
+
+def format_value(val, fmt="{:.2f}"):
+    if val is None or val == 'N/A' or val == '':
+        return "N/A"
+    try:
+        return fmt.format(float(val))
+    except:
+        return str(val)
 
 def show_stock_details(ticker):
     try:
@@ -484,14 +528,18 @@ def show_stock_details(ticker):
                         'currentPrice': row.get('当前价格'),
                         'fiftyTwoWeekHigh': row.get('52周最高'),
                         'fiftyTwoWeekLow': row.get('52周最低'),
-                        'marketCap': row.get('市值(亿)', 0) * 100000000,
-                        'trailingPE': row.get('市盈率(PE)'),
-                        'returnOnEquity': row.get('ROE(%)') / 100, # 还原为小数
-                        'debtToEquity': row.get('债务权益比(%)'),
-                        'grossMargins': row.get('毛利率(%)') / 100, # 还原为小数
+                        'marketCap': row.get('marketCap', row.get('市值(亿)', 0) * 100000000),
+                        'trailingPE': row.get('trailingPE', row.get('市盈率(PE)')),
+                        'forwardPE': row.get('forwardPE'),
+                        'pegRatio': row.get('pegRatio'),
+                        'priceToBook': row.get('priceToBook'),
+                        'enterpriseValue': row.get('enterpriseValue'),
+                        'returnOnEquity': row.get('returnOnEquity', row.get('ROE(%)', 0) / 100),
+                        'debtToEquity': row.get('debtToEquity', row.get('债务权益比(%)')),
+                        'grossMargins': row.get('grossMargins', row.get('毛利率(%)', 0) / 100),
                         'industry': row.get('行业'),
-                        'longBusinessSummary': '⚠️ 网络繁忙或API受限，当前显示为缓存的基础数据。详细简介暂时无法获取。',
-                        'dividendYield': None
+                        'longBusinessSummary': row.get('longBusinessSummary', '⚠️ 网络繁忙或API受限，当前显示为缓存的基础数据。详细简介暂时无法获取。'),
+                        'dividendYield': row.get('dividendYield')
                     }
                 else:
                     st.error("无法获取详情，且找不到缓存的基础数据。")
@@ -502,15 +550,20 @@ def show_stock_details(ticker):
 
         st.markdown(f"### {info.get('shortName')} ({ticker})")
         if is_backup_mode:
-             st.warning("当前处于备用数据模式 (API限流保护)，仅显示核心数据。")
+             st.warning("当前处于备用数据模式 (API限流保护)，已加载本地缓存的完整数据。")
         
+        # 定义自定义指标组件 (带颜色)
+        def custom_metric(label, value, color="#2962FF"):
+            st.markdown(f"<div style='font-size: 14px; color: rgba(49, 51, 63, 0.6); margin-bottom: -10px;'>{label}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='font-size: 24px; font-weight: 600; color: {color}; overflow-wrap: break-word; line-height: 1.2; margin-bottom: 1rem;'>{value}</div>", unsafe_allow_html=True)
+
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("当前价格", f"${info.get('currentPrice', 0)}")
+            custom_metric("当前价格", f"${info.get('currentPrice', 0)}")
         with col2:
-            st.metric("52周最高", f"${info.get('fiftyTwoWeekHigh', 0)}")
+            custom_metric("52周最高", f"${info.get('fiftyTwoWeekHigh', 0)}")
         with col3:
-            st.metric("52周最低", f"${info.get('fiftyTwoWeekLow', 0)}")
+            custom_metric("52周最低", f"${info.get('fiftyTwoWeekLow', 0)}")
             
         st.markdown("#### 公司简介")
         # 尝试翻译简介或者直接显示英文
@@ -543,11 +596,11 @@ def show_stock_details(ticker):
             
             b_col1, b_col2, b_col3 = st.columns(3)
             with b_col1:
-                st.metric("持仓数量", f"{shares:,} 股")
+                custom_metric("持仓数量", f"{shares:,} 股", color="#2962FF")
             with b_col2:
-                st.metric("当前持仓市值", market_value_str)
+                custom_metric("当前持仓市值", market_value_str, color="#2962FF")
             with b_col3:
-                st.metric("估计成本", cost)
+                custom_metric("估计成本", cost, color="#FF6D00") # 橙色显示成本
                 
             st.caption(f"数据来源: Berkshire Hathaway 13F Filing (Q3 2025). 成本数据仅为估计或未公开。")
         else:
@@ -566,7 +619,22 @@ def show_stock_details(ticker):
 
         # 计算行业均值
         industry = info.get('industry')
-        avgs = get_industry_averages(industry) if industry else {}
+        avgs = get_industry_averages(industry) if industry else {'count': 0}
+        
+        count = avgs.get('count', 0)
+        
+        if count > 1:
+            avg_col_name = f"同榜行业均值 (共{count}家)"
+            avg_pe = avgs.get('avg_pe', '-')
+            avg_roe = avgs.get('avg_roe', '-')
+            avg_de = avgs.get('avg_de', '-')
+            avg_margin = avgs.get('avg_margin', '-')
+        else:
+            avg_col_name = "同榜行业均值"
+            avg_pe = "仅此一家入选"
+            avg_roe = "仅此一家入选"
+            avg_de = "仅此一家入选"
+            avg_margin = "仅此一家入选"
         
         # 准备数据
         roe = info.get('returnOnEquity')
@@ -578,29 +646,71 @@ def show_stock_details(ticker):
         gross_margins = info.get('grossMargins')
         gm_str = f"{gross_margins * 100:.2f}%" if gross_margins is not None else "N/A"
 
+        # 安全获取并格式化数值，防止 NoneType 错误
+        market_cap_val = info.get('marketCap')
+        market_cap_str = f"${market_cap_val:,}" if market_cap_val is not None else "N/A"
+
+        ev_val = info.get('enterpriseValue')
+        ev_str = f"${ev_val:,}" if ev_val is not None else "N/A"
+
         fin_data = {
             "指标": [
                 "总市值", "企业价值", "静态市盈率 (TTM)", "预测市盈率 (Forward)", "PEG 比率", 
                 "市净率 (P/B)", "股息率", "ROE (净资产收益率)", "负债权益比 (负债率)", "毛利率"
             ],
             "数值": [
-                f"${info.get('marketCap', 0):,}",
-                f"${info.get('enterpriseValue', 0):,}",
-                str(info.get('trailingPE', 'N/A')),
-                str(info.get('forwardPE', 'N/A')),
-                str(info.get('pegRatio', 'N/A')),
-                str(info.get('priceToBook', 'N/A')),
+                market_cap_str,
+                ev_str,
+                format_value(info.get('trailingPE')),
+                format_value(info.get('forwardPE')),
+                format_value(info.get('pegRatio')),
+                format_value(info.get('priceToBook')),
                 div_yield_str,
                 roe_str,
                 de_str,
                 gm_str
             ],
-            "同榜行业均值 (仅供参考)": [
-                "", "", avgs.get('avg_pe', '-'), "", "", 
-                "", "", avgs.get('avg_roe', '-'), avgs.get('avg_de', '-'), avgs.get('avg_margin', '-')
+            avg_col_name: [
+                "", "", avg_pe, "", "", 
+                "", "", avg_roe, avg_de, avg_margin
             ]
         }
-        st.table(pd.DataFrame(fin_data))
+        
+        fin_df = pd.DataFrame(fin_data)
+        
+        # 定义每一行的颜色样式
+        # 0: 总市值 (蓝)
+        # 1: 企业价值 (蓝)
+        # 2-5: 估值指标 PE, PEG, PB (紫)
+        # 6: 股息率 (绿)
+        # 7: ROE (绿)
+        # 8: 负债率 (红)
+        # 9: 毛利率 (绿)
+        
+        def highlight_metrics(row):
+            styles = [''] * len(row) # 初始化样式列表
+            idx = row.name # 获取行索引
+            
+            color = 'black'
+            if idx in [0, 1]:
+                color = '#2962FF' # 蓝
+            elif idx in [2, 3, 4, 5]:
+                color = '#6200EA' # 紫
+            elif idx in [6, 7, 9]:
+                color = '#00C853' # 绿
+            elif idx == 8:
+                color = '#D50000' # 红
+            
+            # 应用颜色到数值列 (第1列和第2列，索引为1和2)
+            # pandas series index: 0=指标, 1=数值, 2=avg_col_name
+            styles[1] = f'color: {color}; font-weight: 500;'
+            styles[2] = f'color: {color}; font-weight: 500;'
+            
+            return styles
+
+        # 使用 apply 对每一行应用样式
+        styled_fin_df = fin_df.style.apply(highlight_metrics, axis=1)
+        st.table(styled_fin_df)
         
     except Exception as e:
         st.error(f"无法获取详情: {e}")
