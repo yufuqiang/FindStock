@@ -41,7 +41,7 @@ def load_cache():
         try:
             df = pd.read_csv(CACHE_FILE)
             # 检查是否有必要的列，如果没有则认为缓存失效
-            required_columns = ['中文名称', '中文行业', '52周最高', '52周最低']
+            required_columns = ['中文名称', '中文行业', '52周最高', '52周最低', '当前价格']
             if not all(col in df.columns for col in required_columns):
                 return None, None
                 
@@ -299,7 +299,7 @@ def main():
         
         # 检查缓存是否包含新添加的列，如果不包含则失效
         if cached_df is not None:
-            required_cols = ['PEG', '净利率(%)', '自由现金流(亿)', '估值状态', '52周范围', 'PE/ROE', '负债/毛利', '公司/行业']
+            required_cols = ['PEG', '净利率(%)', '自由现金流(亿)', '估值状态', '52周范围', 'PE/ROE', '负债/毛利', '公司/行业', '当前价格']
             if not all(col in cached_df.columns for col in required_cols):
                 cached_df = None
                 last_updated = None
