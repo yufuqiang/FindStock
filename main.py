@@ -263,7 +263,10 @@ def main():
         st.caption("尚未获取数据")
     
     if start_btn:
-        with st.spinner('正在获取S&P 500列表并分析数据，请耐心等待（这可能需要几分钟）...'):
+        # 清除缓存，强制重新获取
+        analyze_stocks.clear()
+        
+        with st.spinner('正在强制刷新数据并分析（这可能需要几分钟，请耐心等待）...'):
             tickers = get_sp500_tickers()
             if tickers:
                 # 我们可以先只取前50个做演示，因为500个太慢了
