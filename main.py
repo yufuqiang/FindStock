@@ -11,7 +11,7 @@ import time
 from deep_translator import GoogleTranslator
 
 # 设置页面配置
-st.set_page_config(page_title="巴菲特价值选股器", layout="wide")
+st.set_page_config(page_title="价值选股器", layout="wide")
 
 CACHE_FILE = "stock_cache.csv"
 META_FILE = "cache_metadata.json"
@@ -279,17 +279,29 @@ def main():
 
     if st.session_state.data is not None:
         df = st.session_state.data
-        # 移除重复的时间显示
-        # if 'last_updated' in st.session_state and st.session_state.last_updated:
-        #      st.caption(f"数据统计时间: {st.session_state.last_updated}")
+        
+        # 按照当前价最接近52周最低价排序
+        # 计算逻辑：(当前价格 - 52周最低) / 52周最低，值越小越靠前
+        try:
+            # 确保列是数值类型
+            df['当前价格'] = pd.to_numeric(df['当前价格'], errors='coerce')
+            df['52周最低'] = pd.to_numeric(df['52周最低'], errors='coerce')
+            
+            # 计算偏离度
+            df['low_diff'] = (df['当前价格'] - df['52周最低']) / df['52周最低']
+            
+            # 排序
+            df = df.sort_values(by='low_diff', ascending=True)
+        except Exception as e:
+            st.error(f"排序计算出错: {e}")
 
         if df.empty:
             st.warning("没有找到符合所有条件的股票。")
         else:
-            # st.success(f"筛选出 {len(df)} 只符合条件的股票：")
-            # st.info("💡 点击表格中的行可以查看股票详情")
-            
             # 显示表格
+            # 提示用户操作
+            st.caption("💡 单击表格中的行查看详细信息（已按接近52周最低价排序）")
+            
             event = st.dataframe(
                 df,
                 column_config={
@@ -316,8 +328,60 @@ def main():
             # 股票详情查看
             if len(event.selection.rows) > 0:
                 selected_index = event.selection.rows[0]
+                # 注意：排序后索引变了，需要用 iloc 获取正确的数据
                 selected_ticker = df.iloc[selected_index]['代码']
-                show_stock_details(selected_ticker)
+                show_stock_details_dialog(selected_ticker)
+
+@st.dialog("股票详情")
+def show_stock_details_dialog(ticker):
+    show_stock_details(ticker)
+
+
+# 巴菲特持仓数据 (截至 2025年 Q3)
+# 数据来源: 13F Filing via Dataroma/CNBC
+BUFFETT_HOLDINGS = {
+    "AAPL": {"shares": 238212764, "cost": "约 $35 (历史持仓)"},
+    "AXP": {"shares": 151610700, "cost": "未公开"},
+    "BAC": {"shares": 568070012, "cost": "未公开"},
+    "KO": {"shares": 400000000, "cost": "未公开"},
+    "CVX": {"shares": 122064792, "cost": "未公开"},
+    "OXY": {"shares": 264941431, "cost": "未公开"},
+    "MCO": {"shares": 24669778, "cost": "未公开"},
+    "CB": {"shares": 31332895, "cost": "约 $264-$291 (近期增持)"},
+    "KHC": {"shares": 325634818, "cost": "未公开"},
+    "GOOGL": {"shares": 17846142, "cost": "未公开"},
+    "DVA": {"shares": 32160579, "cost": "未公开"},
+    "KR": {"shares": 50000000, "cost": "未公开"},
+    "SIRI": {"shares": 124807117, "cost": "混合成本"},
+    "V": {"shares": 8297460, "cost": "未公开"},
+    "VRSN": {"shares": 8989880, "cost": "未公开"},
+    "MA": {"shares": 3986648, "cost": "未公开"},
+    "AMZN": {"shares": 10000000, "cost": "未公开"},
+    "STZ": {"shares": 13400000, "cost": "未公开"},
+    "UNH": {"shares": 5039564, "cost": "未公开"},
+    "COF": {"shares": 7150000, "cost": "未公开"},
+    "AON": {"shares": 4100000, "cost": "未公开"},
+    "DPZ": {"shares": 2981945, "cost": "约 $402-$504"},
+    "ALLY": {"shares": 29000000, "cost": "未公开"},
+    "LLYVK": {"shares": 10917661, "cost": "未公开"},
+    "POOL": {"shares": 3458885, "cost": "未公开"},
+    "LEN": {"shares": 7050950, "cost": "未公开"},
+    "NUE": {"shares": 6407749, "cost": "未公开"},
+    "LPX": {"shares": 5664793, "cost": "未公开"},
+    "LLYVA": {"shares": 4986588, "cost": "未公开"},
+    "FWONK": {"shares": 3018555, "cost": "未公开"},
+    "HEI-A": {"shares": 1294612, "cost": "未公开"},
+    "CHTR": {"shares": 1060882, "cost": "未公开"},
+    "LAMR": {"shares": 1202110, "cost": "约 $100-$123"},
+    "ALLE": {"shares": 780133, "cost": "未公开"},
+    "NVR": {"shares": 11112, "cost": "未公开"},
+    "DEO": {"shares": 227750, "cost": "未公开"},
+    "JEF": {"shares": 433558, "cost": "未公开"},
+    "LEN-B": {"shares": 180980, "cost": "未公开"},
+    "LILA": {"shares": 2630792, "cost": "未公开"},
+    "BATRK": {"shares": 223645, "cost": "未公开"},
+    "LILAK": {"shares": 1284020, "cost": "未公开"}
+}
 
 def show_stock_details(ticker):
     try:
@@ -336,18 +400,66 @@ def show_stock_details(ticker):
             
         st.markdown("#### 公司简介")
         # 尝试翻译简介或者直接显示英文
-        st.write(info.get('longBusinessSummary', '暂无简介'))
+        summary = info.get('longBusinessSummary', '暂无简介')
+        if summary and summary != '暂无简介':
+            # 如果简介太长，Google Translate API可能会报错，可以考虑截断或者分段，这里先直接尝试
+            # 为了更好的体验，可以在这里显示“正在翻译...”
+            summary = translate_text(summary)
+        st.write(summary)
         
+        # 巴菲特持仓情况 (新增)
+        st.markdown("#### 🏦 巴菲特持仓情况")
+        
+        # 标准化 ticker (将 . 替换为 - 以匹配字典键)
+        lookup_ticker = ticker.replace('.', '-')
+        
+        if lookup_ticker in BUFFETT_HOLDINGS:
+            holding = BUFFETT_HOLDINGS[lookup_ticker]
+            shares = holding['shares']
+            cost = holding['cost']
+            
+            # 计算持仓市值 (如果能获取到当前价格)
+            current_price = info.get('currentPrice', 0)
+            market_value_str = "N/A"
+            if current_price and shares:
+                 market_value = current_price * shares
+                 market_value_str = f"${market_value:,.2f}"
+            
+            st.success(f"✅ 巴菲特 (Berkshire Hathaway) 持有此股")
+            
+            b_col1, b_col2, b_col3 = st.columns(3)
+            with b_col1:
+                st.metric("持仓数量", f"{shares:,} 股")
+            with b_col2:
+                st.metric("当前持仓市值", market_value_str)
+            with b_col3:
+                st.metric("估计成本", cost)
+                
+            st.caption(f"数据来源: Berkshire Hathaway 13F Filing (Q3 2025). 成本数据仅为估计或未公开。")
+        else:
+            st.info("ℹ️ 巴菲特 (Berkshire Hathaway) 当前未持有此股 (基于 Q3 2025 数据)")
+
         st.markdown("#### 核心财务数据")
+        
+        # 格式化股息率
+        div_yield = info.get('dividendYield')
+        if div_yield is not None:
+            # yfinance 返回的 dividendYield 通常已经是百分比数值 (例如 0.38 代表 0.38%, 7.34 代表 7.34%)
+            # 不需要乘以 100
+            div_yield_str = f"{div_yield:.2f}%"
+        else:
+            div_yield_str = "N/A"
+
         fin_data = {
-            "指标": ["市值", "企业价值", "Trailing PE", "Forward PE", "PEG Ratio", "Price/Book"],
+            "指标": ["总市值", "企业价值", "静态市盈率 (TTM)", "预测市盈率 (Forward)", "PEG 比率", "市净率 (P/B)", "股息率"],
             "数值": [
                 f"${info.get('marketCap', 0):,}",
                 f"${info.get('enterpriseValue', 0):,}",
                 str(info.get('trailingPE', 'N/A')),
                 str(info.get('forwardPE', 'N/A')),
                 str(info.get('pegRatio', 'N/A')),
-                str(info.get('priceToBook', 'N/A'))
+                str(info.get('priceToBook', 'N/A')),
+                div_yield_str
             ]
         }
         st.table(pd.DataFrame(fin_data))
