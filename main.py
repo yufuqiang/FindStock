@@ -12,6 +12,27 @@ import random
 from deep_translator import GoogleTranslator
 import concurrent.futures
 
+# 导入Gist存储模块
+import gist_storage
+
+# 配置文件路径
+GIST_CONFIG_FILE = "gist_config.json"
+
+# 加载Gist配置
+def load_gist_config():
+    """加载Gist配置"""
+    try:
+        with open(GIST_CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"stock_cache_gist_id": None, "market_data_gist_id": None}
+
+# 保存Gist配置
+def save_gist_config(config):
+    """保存Gist配置"""
+    with open(GIST_CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=2)
+
 # 设置页面配置
 st.set_page_config(page_title="价值选股器", layout="wide")
 
@@ -289,33 +310,115 @@ def translate_text(text):
 
 def save_cache(df):
     try:
-        df.to_csv(CACHE_FILE, index=False)
-        with open(META_FILE, 'w') as f:
-            json.dump({"last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
-        return True
+        # 将DataFrame转换为CSV字符串
+        csv_content = df.to_csv(index=False)
+        # 保存元数据
+        meta_content = json.dumps({"last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+        
+        # 加载Gist配置
+        config = load_gist_config()
+        stock_cache_gist_id = config.get("stock_cache_gist_id")
+        
+        # 如果Gist ID存在，更新现有的Gist
+        if stock_cache_gist_id:
+            # 先获取现有的Gist内容
+            existing_gist = gist_storage.get_gist(stock_cache_gist_id)
+            if existing_gist:
+                # 更新Gist中的文件
+                files = existing_gist["files"]
+                files["stock_cache.csv"] = {"content": csv_content}
+                files["cache_metadata.json"] = {"content": meta_content}
+                
+                response = gist_storage.update_gist(stock_cache_gist_id, "stock_cache.csv", csv_content)
+                # 同时更新元数据文件
+                gist_storage.update_gist(stock_cache_gist_id, "cache_metadata.json", meta_content)
+                if response:
+                    return True
+                else:
+                    # 更新失败，尝试创建新的Gist
+                    pass
+        
+        # 如果Gist ID不存在或更新失败，创建新的Gist
+        response = gist_storage.create_gist(
+            "stock_cache.csv", 
+            csv_content, 
+            description="Stock cache data for value stock selector"
+        )
+        
+        if response:
+            # 获取新创建的Gist ID
+            new_gist_id = response["id"]
+            # 更新Gist配置
+            config["stock_cache_gist_id"] = new_gist_id
+            save_gist_config(config)
+            
+            # 上传元数据文件
+            gist_storage.update_gist(new_gist_id, "cache_metadata.json", meta_content)
+            return True
+        else:
+            # Gist存储失败，尝试保存到本地作为后备
+            df.to_csv(CACHE_FILE, index=False)
+            with open(META_FILE, 'w') as f:
+                json.dump({"last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
+            st.warning("Gist存储失败，已保存到本地缓存")
+            return True
+            
     except Exception as e:
         st.error(f"缓存保存失败: {e}")
-        return False
+        # 保存到本地作为后备
+        try:
+            df.to_csv(CACHE_FILE, index=False)
+            with open(META_FILE, 'w') as f:
+                json.dump({"last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, f)
+            st.warning("已保存到本地缓存")
+            return True
+        except:
+            return False
 
 def load_cache():
+    # 首先尝试从Gist加载
+    config = load_gist_config()
+    stock_cache_gist_id = config.get("stock_cache_gist_id")
+    
+    if stock_cache_gist_id:
+        gist = gist_storage.get_gist(stock_cache_gist_id)
+        if gist:
+            files = gist["files"]
+            
+            # 检查是否有必要的文件
+            if "stock_cache.csv" in files and "cache_metadata.json" in files:
+                try:
+                    # 加载CSV数据
+                    csv_content = files["stock_cache.csv"]["content"]
+                    df = pd.read_csv(StringIO(csv_content))
+                    
+                    # 检查是否有必要的列，如果没有则认为缓存失效
+                    required_columns = ['中文名称', '中文行业', '52周最高', '52周最低', '当前价格']
+                    if all(col in df.columns for col in required_columns):
+                        # 加载元数据
+                        meta_content = files["cache_metadata.json"]["content"]
+                        meta = json.loads(meta_content)
+                        return df, meta.get("last_updated", "未知时间")
+                except Exception as e:
+                    print(f"从Gist加载缓存失败: {e}")
+    
+    # 如果Gist加载失败，尝试从本地文件加载
     if os.path.exists(CACHE_FILE) and os.path.exists(META_FILE):
         try:
             df = pd.read_csv(CACHE_FILE)
-            # 检查是否有必要的列，如果没有则认为缓存失效
             required_columns = ['中文名称', '中文行业', '52周最高', '52周最低', '当前价格']
-            if not all(col in df.columns for col in required_columns):
-                return None, None
-                
-            with open(META_FILE, 'r') as f:
-                meta = json.load(f)
-            return df, meta.get("last_updated", "未知时间")
-        except Exception:
-            return None, None
+            if all(col in df.columns for col in required_columns):
+                with open(META_FILE, 'r') as f:
+                    meta = json.load(f)
+                return df, meta.get("last_updated", "未知时间")
+        except Exception as e:
+            print(f"从本地加载缓存失败: {e}")
+    
     return None, None
 
 # 通用缓存函数
 def save_generic_cache(key, data, ttl=3600*24):
-    """保存通用数据到缓存文件
+    """保存通用数据到缓存文件或GitHub Gist
     
     Args:
         key: 缓存键名
@@ -328,21 +431,95 @@ def save_generic_cache(key, data, ttl=3600*24):
         'ttl': ttl
     }
     cache_file = f"{key}.json"
+    
+    try:
+        # 尝试保存到GitHub Gist
+        config = load_gist_config()
+        market_data_gist_id = config.get("market_data_gist_id")
+        
+        # 如果Gist ID存在，更新现有的Gist
+        if market_data_gist_id:
+            # 先获取现有的Gist内容
+            existing_gist = gist_storage.get_gist(market_data_gist_id)
+            if existing_gist:
+                # 更新Gist中的文件
+                files = existing_gist["files"]
+                files[cache_file] = {"content": json.dumps(cache_data)}
+                
+                response = gist_storage.update_gist(market_data_gist_id, cache_file, json.dumps(cache_data))
+                if response:
+                    # 同时保存到本地作为备份
+                    with open(cache_file, 'w') as f:
+                        json.dump(cache_data, f)
+                    return True
+        
+        # 如果Gist ID不存在，创建新的Gist
+        response = gist_storage.create_gist(
+            cache_file, 
+            json.dumps(cache_data), 
+            description="Market data cache for value stock selector"
+        )
+        
+        if response:
+            # 获取新创建的Gist ID
+            new_gist_id = response["id"]
+            # 更新Gist配置
+            config["market_data_gist_id"] = new_gist_id
+            save_gist_config(config)
+            
+            # 同时保存到本地作为备份
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f)
+            return True
+    except Exception as e:
+        print(f"保存到Gist失败: {e}")
+    
+    # 如果Gist保存失败，保存到本地文件
     try:
         with open(cache_file, 'w') as f:
             json.dump(cache_data, f)
         return True
     except Exception as e:
-        print(f"保存缓存失败: {e}")
+        print(f"保存到本地缓存失败: {e}")
         return False
 
 def load_generic_cache(key):
-    """从缓存文件加载通用数据，检查缓存是否过期
+    """从缓存文件或GitHub Gist加载通用数据，检查缓存是否过期
     
     Returns:
         如果缓存存在且未过期，返回数据；否则返回None
     """
     cache_file = f"{key}.json"
+    
+    try:
+        # 尝试从GitHub Gist加载
+        config = load_gist_config()
+        market_data_gist_id = config.get("market_data_gist_id")
+        
+        if market_data_gist_id:
+            gist = gist_storage.get_gist(market_data_gist_id)
+            if gist:
+                files = gist["files"]
+                if cache_file in files:
+                    try:
+                        cache_content = files[cache_file]["content"]
+                        cache_data = json.loads(cache_content)
+                        
+                        # 检查缓存是否过期
+                        if time.time() - cache_data['timestamp'] < cache_data['ttl']:
+                            # 同时保存到本地作为备份
+                            with open(cache_file, 'w') as f:
+                                json.dump(cache_data, f)
+                            return cache_data['data']
+                        else:
+                            print(f"Gist缓存已过期: {key}")
+                            return None
+                    except Exception as e:
+                        print(f"从Gist加载缓存失败: {e}")
+    except Exception as e:
+        print(f"Gist操作失败: {e}")
+    
+    # 如果Gist加载失败，尝试从本地文件加载
     if os.path.exists(cache_file):
         try:
             with open(cache_file, 'r') as f:
@@ -352,11 +529,12 @@ def load_generic_cache(key):
             if time.time() - cache_data['timestamp'] < cache_data['ttl']:
                 return cache_data['data']
             else:
-                print(f"缓存已过期: {key}")
+                print(f"本地缓存已过期: {key}")
                 return None
         except Exception as e:
-            print(f"加载缓存失败: {e}")
+            print(f"从本地加载缓存失败: {e}")
             return None
+    
     return None
 
 # 获取S&P 500成分股列表
