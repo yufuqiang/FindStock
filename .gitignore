@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+*.json
 *.pyc
 *.pyo
 *.pyd

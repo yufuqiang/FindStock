@@ -530,7 +530,9 @@ def show_buffett_activity_dialog():
         full_data = []
         for item in portfolio_data:
             ticker = item['代码']
-            m_data = market_data.get(ticker, {})
+            # 统一处理股票代码格式，与get_market_data()函数保持一致
+            lookup_ticker = ticker.replace('.', '-')
+            m_data = market_data.get(lookup_ticker, {})
             
             # 使用API数据，如果不可用则使用后备数据
             cur_price = m_data.get('current_price')
@@ -539,7 +541,8 @@ def show_buffett_activity_dialog():
             
             # 如果API数据不可用，尝试使用后备数据
             if not cur_price or not y_low or not y_high:
-                fallback_data = fallback_market_data.get(ticker, {})
+                # 使用统一格式的股票代码查找后备数据
+                fallback_data = fallback_market_data.get(lookup_ticker, {})
                 if not cur_price:
                     cur_price = fallback_data.get('current_price')
                 if not y_low:
@@ -550,8 +553,8 @@ def show_buffett_activity_dialog():
             # 如果后备数据也不可用，使用静态估计值
             if not cur_price:
                 # 尝试从持仓平均成本估算当前价格
-                if ticker in static_costs:
-                    cost_str = static_costs[ticker].get('cost', '')
+                if lookup_ticker in static_costs:
+                    cost_str = static_costs[lookup_ticker].get('cost', '')
                     if cost_str.startswith('约 $'):
                         cost_num = float(cost_str[3:].split()[0].replace(',', ''))
                         cur_price = cost_num * 1.1  # 假设当前价格比成本高10%
@@ -563,8 +566,8 @@ def show_buffett_activity_dialog():
             
             # 获取平均成本 (优先使用静态维护的精确数据)
             avg_cost = "N/A"
-            if ticker in static_costs:
-                avg_cost = static_costs[ticker].get('cost', 'N/A')
+            if lookup_ticker in static_costs:
+                avg_cost = static_costs[lookup_ticker].get('cost', 'N/A')
             
             # 整理数据
             row = item.copy()
