@@ -124,10 +124,10 @@ def get_buffett_holdings_dynamic():
         return {}
 
 @st.cache_data(ttl=30*24*60*60) # 缓存30天
-def get_buffett_recent_activity():
+def get_buffett_portfolio_data():
     """
-    获取巴菲特近期交易记录 (从 Dataroma)
-    返回: List[Dict] 包含代码、名称、操作方向、变动比例、报告价格等
+    获取巴菲特持仓数据 (从 Dataroma)
+    返回: List[Dict] 包含代码、名称、持仓比例、股份数、价值、近期活动等
     """
     url = "https://www.dataroma.com/m/holdings.php?m=BRK"
     headers = {
@@ -141,48 +141,212 @@ def get_buffett_recent_activity():
         if not table:
             return []
             
-        activities = []
-        # 列索引 (基于 Dataroma Mobile 版):
+        portfolio = []
+        # 列索引 (基于 Dataroma Mobile/Web 版):
         # 1: Stock (Name)
-        # 3: RecentActivity (e.g., "Reduce 14.92%", "Add 0.12%", "New")
+        # 2: % of Portfolio
+        # 3: RecentActivity
+        # 4: Shares
         # 5: ReportedPrice
+        # 6: Value
         
         for row in table.findAll('tr')[1:]:
             cols = [c.text.strip() for c in row.findAll('td')]
-            if len(cols) >= 6:
+            if len(cols) >= 7:
+                name_col = cols[1]
+                ticker = name_col.split(' - ')[0].strip().replace('.', '-')
+                name = name_col.split(' - ')[1].strip() if ' - ' in name_col else name_col
+                
+                pct_portfolio = cols[2]
                 activity_text = cols[3]
-                if activity_text: # 如果有活动记录
-                    name_col = cols[1]
-                    ticker = name_col.split(' - ')[0].strip().replace('.', '-')
-                    name = name_col.split(' - ')[1].strip() if ' - ' in name_col else name_col
-                    
-                    reported_price = cols[5]
-                    
-                    # 简单的翻译
-                    act_type = "未知"
+                shares = cols[4]
+                reported_price = cols[5]
+                value = cols[6]
+                
+                # 简单的翻译活动类型
+                act_type = ""
+                if activity_text:
                     if "New" in activity_text:
-                        act_type = "新增"
+                        act_type = "🆕 建仓"
                     elif "Add" in activity_text or "Buy" in activity_text:
                         act_type = "➕ 增持"
                     elif "Reduce" in activity_text or "Sell" in activity_text:
                         act_type = "➖ 减持"
-                    
-                    activities.append({
-                        "代码": ticker,
-                        "名称": name,
-                        "操作": act_type,
-                        "变动详情": activity_text,
-                        "交易价格(估)": reported_price
-                    })
-        return activities
+                
+                portfolio.append({
+                    "代码": ticker,
+                    "名称": name,
+                    "持仓比例": pct_portfolio,
+                    "操作": act_type,
+                    "变动详情": activity_text,
+                    "股份数": shares,
+                    "报告价格": reported_price, # 最近季度末价格或交易价格
+                    "持仓市值": value
+                })
+        return portfolio
     except Exception as e:
-        print(f"Error scraping Buffett activity: {e}")
+        print(f"Error scraping Buffett portfolio: {e}")
         return []
 
+@st.dialog("巴菲特持仓分析 (Dataroma)", width="large")
+def show_buffett_activity_dialog():
+    # 自定义 CSS 调整弹窗尺寸
+    st.markdown("""
+        <style>
+        div[role="dialog"][aria-modal="true"] {
+            width: 80vw !important;
+            max-width: 1400px !important;
+            height: 90vh !important;
+            max-height: 1000px !important;
+        }
+        /* 调整表格字体大小 */
+        .stDataFrame { font-size: 0.9rem; }
+        </style>
+    """, unsafe_allow_html=True)
 
-import concurrent.futures
+    with st.spinner("正在获取持仓与行情数据..."):
+        portfolio_data = get_buffett_portfolio_data()
+        if not portfolio_data:
+            st.warning("未找到持仓记录或无法连接数据源。")
+            return
+            
+        # 提取 Tickers
+        tickers = [item['代码'] for item in portfolio_data]
+        
+        # 并发获取实时行情 (fast_info)
+        market_data = {}
+        if tickers:
+            try:
+                def get_quote(ticker):
+                    try:
+                        stock = yf.Ticker(ticker)
+                        info = stock.fast_info
+                        return {
+                            "current_price": info.last_price,
+                            "year_low": info.year_low,
+                            "year_high": info.year_high
+                        }
+                    except:
+                        return None
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                    futures = {executor.submit(get_quote, t): t for t in tickers}
+                    for future in concurrent.futures.as_completed(futures):
+                        t = futures[future]
+                        res = future.result()
+                        if res:
+                            market_data[t] = res
+            except Exception as e:
+                st.error(f"获取行情失败: {e}")
+        
+        # 准备静态成本数据
+        static_costs = BUFFETT_HOLDINGS_STATIC
 
-# 获取股票数据并筛选
+        # 构建完整的 DataFrame 数据源
+        full_data = []
+        for item in portfolio_data:
+            ticker = item['代码']
+            m_data = market_data.get(ticker, {})
+            
+            cur_price = m_data.get('current_price')
+            y_low = m_data.get('year_low')
+            y_high = m_data.get('year_high')
+            
+            # 获取平均成本 (优先使用静态维护的精确数据)
+            avg_cost = "N/A"
+            if ticker in static_costs:
+                avg_cost = static_costs[ticker].get('cost', 'N/A')
+            
+            # 整理数据
+            row = item.copy()
+            row['最新价'] = f"${cur_price:.2f}" if cur_price else "N/A"
+            row['52周最低'] = f"${y_low:.2f}" if y_low else "N/A"
+            row['52周最高'] = f"${y_high:.2f}" if y_high else "N/A"
+            row['持仓平均成本'] = avg_cost
+            row['raw_pct'] = float(item['持仓比例']) if item['持仓比例'] else 0
+            
+            full_data.append(row)
+
+        # 选项卡
+        tab1, tab2 = st.tabs(["📊 近期交易记录", "💼 持仓详情 (按比例排序)"])
+        
+        # --- Tab 1: 近期交易记录 ---
+        with tab1:
+            # 筛选有变动的记录
+            activity_rows = [r for r in full_data if r['变动详情']]
+            
+            if not activity_rows:
+                st.info("本期无交易记录。")
+            else:
+                display_data_act = []
+                for r in activity_rows:
+                    display_data_act.append({
+                        "代码": r['代码'],
+                        "名称": r['名称'],
+                        "操作": r['操作'],
+                        "变动详情": r['变动详情'],
+                        "巴菲特交易价(估)": r['报告价格'],
+                        "最新价": r['最新价'],
+                        "52周最低": r['52周最低'],
+                        "52周最高": r['52周最高']
+                    })
+                
+                df_act = pd.DataFrame(display_data_act)
+                
+                # 样式逻辑 (复用之前的)
+                def highlight_row_opportunity(row):
+                    styles = [''] * len(row)
+                    try:
+                        action = str(row['操作'])
+                        if "新增" not in action and "增持" not in action: return styles
+                        
+                        cur_str = str(row['最新价']).replace('$', '').replace(',', '')
+                        cur_val = float(cur_str) if cur_str != 'N/A' else 999999
+                        
+                        cost_str = str(row['巴菲特交易价(估)']).replace('$', '').replace(',', '')
+                        cost_val = float(cost_str) if cost_str else 0
+                        
+                        if cur_val < cost_val and cost_val > 0:
+                            styles = ['background-color: #e8f5e9; color: #1b5e20'] * len(row)
+                            if "新增" in action:
+                                op_idx = df_act.columns.get_loc('操作')
+                                styles[op_idx] += '; color: #00C853; font-weight: bold'
+                    except: pass
+                    return styles
+
+                styled_act = df_act.style.apply(highlight_row_opportunity, axis=1)
+                st.dataframe(styled_act, use_container_width=True, hide_index=True, height=500)
+                st.caption("注：'交易价(估)' 为 Dataroma 报告价格。绿色背景表示当前价格低于巴菲特近期增持/建仓成本。")
+
+        # --- Tab 2: 持仓详情 ---
+        with tab2:
+            # 按持仓比例排序
+            sorted_holdings = sorted(full_data, key=lambda x: x['raw_pct'], reverse=True)
+            
+            display_data_hold = []
+            for r in sorted_holdings:
+                # 格式化最后操作: 数量(变动详情) + 价格(报告价格)
+                last_action_desc = r['变动详情'] if r['变动详情'] else "无变动"
+                last_price_desc = r['报告价格'] if r['变动详情'] else "-"
+                last_action_combined = f"{r['操作']} {last_action_desc} @ {last_price_desc}" if r['变动详情'] else "-"
+                
+                display_data_hold.append({
+                    "代码": r['代码'],
+                    "名称": r['名称'],
+                    "持仓比例(%)": r['持仓比例'],
+                    "持仓平均成本": r['持仓平均成本'],
+                    "最新价": r['最新价'],
+                    "最后操作": last_action_combined,
+                    "52周最低": r['52周最低'],
+                    "52周最高": r['52周最高'],
+                    "持仓市值": r['持仓市值'],
+                    "股份数": r['股份数']
+                })
+            
+            df_hold = pd.DataFrame(display_data_hold)
+            st.dataframe(df_hold, use_container_width=True, hide_index=True, height=600)
+            st.caption("注：持仓数据来自 Dataroma (缓存30天)，最新价和52周范围为实时获取。平均成本基于历史数据估算。")
+
 @st.cache_data(ttl=3600*24) # 缓存24小时
 def analyze_stocks(tickers):
     selected_stocks = []
