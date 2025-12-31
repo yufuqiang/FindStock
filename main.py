@@ -104,26 +104,26 @@ def get_market_data(tickers):
     cache_key = "market_data"
     market_data = load_generic_cache(cache_key)
     
-    # 如果缓存存在，检查是否包含所有需要的股票
-    if market_data:
-        # 检查缓存是否包含所有需要的股票
-        missing_tickers = [t for t in tickers if t not in market_data]
-        if not missing_tickers:
-            print(f"使用缓存行情数据，共{len(market_data)}个股票")
-            return market_data
-    
-    # 如果缓存不存在或不完整，获取新数据
-    print(f"缓存不完整或已过期，需要获取{len(tickers)}个股票的行情数据")
-    
     # 初始化市场数据字典
     new_market_data = {}
     
-    # 如果有缓存数据，先使用缓存数据
+    # 如果有缓存数据，先使用缓存数据，但要检查数据有效性
     if market_data:
-        new_market_data = market_data.copy()
+        # 只保留有有效价格数据的缓存项
+        for ticker, data in market_data.items():
+            if data and data.get('current_price') and data.get('current_price') != 100.0:
+                new_market_data[ticker] = data
     
-    # 获取缺失的股票数据
-    missing_tickers = [t for t in tickers if t not in new_market_data]
+    # 检查是否需要获取新数据
+    missing_tickers = [t for t in tickers if t not in new_market_data or 
+                      not new_market_data[t].get('current_price') or 
+                      new_market_data[t].get('current_price') == 100.0]
+    
+    if missing_tickers:
+        print(f"需要获取{len(missing_tickers)}个股票的新数据（缓存缺失或数据无效）")
+    else:
+        print(f"使用缓存行情数据，共{len(new_market_data)}个股票")
+        return new_market_data
     
     if missing_tickers:
         print(f"需要获取{len(missing_tickers)}个股票的新数据")
@@ -149,14 +149,7 @@ def get_market_data(tickers):
                     if not year_high:
                         year_high = fallback_data.get('year_high')
                 
-                # 如果后备数据也不可用，使用静态估计值
-                if not current_price:
-                    current_price = 100.0  # 默认价格
-                if not year_low:
-                    year_low = current_price * 0.8
-                if not year_high:
-                    year_high = current_price * 1.2
-                
+                # 不设置默认值，只使用获取到的真实数据
                 new_market_data[ticker] = {
                     "current_price": current_price,
                     "year_low": year_low,
@@ -199,12 +192,7 @@ def get_market_data(tickers):
                     year_high = finnhub_52w_data.get("metric", {}).get("52WeekHigh")
                     
                     if current_price:
-                        # 如果52周高低不可用，使用当前价格的比例估计
-                        if not year_low:
-                            year_low = current_price * 0.8
-                        if not year_high:
-                            year_high = current_price * 1.2
-                            
+                        # 不设置默认值，只使用获取到的真实数据
                         new_market_data[ticker] = {
                             "current_price": current_price,
                             "year_low": year_low,
@@ -242,8 +230,8 @@ def get_market_data(tickers):
                         if current_price:
                             # 转换数据类型
                             current_price = float(current_price)
-                            year_low = float(year_low) if year_low else current_price * 0.8
-                            year_high = float(year_high) if year_high else current_price * 1.2
+                            year_low = float(year_low) if year_low else None
+                            year_high = float(year_high) if year_high else None
                             
                             new_market_data[ticker] = {
                                 "current_price": current_price,
@@ -256,12 +244,12 @@ def get_market_data(tickers):
                             
                     except Exception as alpha_vantage_error:
                         print(f"Alpha Vantage API获取行情数据失败: {alpha_vantage_error}")
-                        # 使用后备数据
-                        new_market_data[ticker] = fallback_market_data.get(ticker, {
-                            "current_price": 100.0,
-                            "year_low": 80.0,
-                            "year_high": 120.0
-                        })
+                        # 不使用默认值，只记录错误
+                        new_market_data[ticker] = {
+                            "current_price": None,
+                            "year_low": None,
+                            "year_high": None
+                        }
     
     # 保存完整的数据到缓存
     save_generic_cache(cache_key, new_market_data)
@@ -516,7 +504,6 @@ def show_buffett_activity_dialog():
         if tickers:
             try:
                 market_data = get_market_data(tickers)
-                st.info("使用缓存的行情数据 (24小时更新一次)")
             except Exception as e:
                 st.error(f"获取行情失败: {e}")
                 st.info("由于数据提供商限制，无法获取实时行情数据。请稍后再试。")
@@ -571,9 +558,9 @@ def show_buffett_activity_dialog():
             
             # 整理数据
             row = item.copy()
-            row['最新价'] = f"${cur_price:.2f}" if cur_price else "N/A"
-            row['52周最低'] = f"${y_low:.2f}" if y_low else "N/A"
-            row['52周最高'] = f"${y_high:.2f}" if y_high else "N/A"
+            row['最新价'] = f"${cur_price:.2f}" if cur_price else "未获取到"
+            row['52周最低'] = f"${y_low:.2f}" if y_low else "未获取到"
+            row['52周最高'] = f"${y_high:.2f}" if y_high else "未获取到"
             row['持仓平均成本'] = avg_cost
             row['raw_pct'] = float(item['持仓比例']) if item['持仓比例'] else 0
             
@@ -763,13 +750,23 @@ def analyze_stocks(tickers):
                     valuation_status = "🏔️ 高估" # PEG > 2
             
             # 从缓存行情数据中获取价格和52周高低信息
-            cached_stock_data = market_data.get(ticker, {})
-            current_price = cached_stock_data.get('当前价格', info.get('currentPrice', 0))
-            fifty_two_week_high = cached_stock_data.get('52周最高', info.get('fiftyTwoWeekHigh', 0))
-            fifty_two_week_low = cached_stock_data.get('52周最低', info.get('fiftyTwoWeekLow', 0))
+            # 注意：market_data中使用的是英文键名（current_price, year_low, year_high）
+            # 同时需要统一股票代码格式（将.替换为-）
+            lookup_ticker = ticker.replace('.', '-')
+            cached_stock_data = market_data.get(lookup_ticker, {})
+            current_price = cached_stock_data.get('current_price', info.get('currentPrice'))
+            fifty_two_week_high = cached_stock_data.get('year_high', info.get('fiftyTwoWeekHigh'))
+            fifty_two_week_low = cached_stock_data.get('year_low', info.get('fiftyTwoWeekLow'))
             
             # 构建合并显示列
-            range_52 = f"${fifty_two_week_low} - ${fifty_two_week_high}"
+            if fifty_two_week_low and fifty_two_week_high:
+                range_52 = f"${fifty_two_week_low} - ${fifty_two_week_high}"
+            elif fifty_two_week_low:
+                range_52 = f"${fifty_two_week_low} - 未获取到"
+            elif fifty_two_week_high:
+                range_52 = f"未获取到 - ${fifty_two_week_high}"
+            else:
+                range_52 = "未获取到"
             
             pe_display = f"{round(pe, 2)}"
             roe_display = f"{round(roe * 100, 2)}%"
@@ -1253,11 +1250,14 @@ def show_stock_details(ticker):
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            custom_metric("当前价格", f"${info.get('currentPrice', 0)}")
+            current_price = info.get('currentPrice')
+            custom_metric("当前价格", f"${current_price}" if current_price else "未获取到")
         with col2:
-            custom_metric("52周最高", f"${info.get('fiftyTwoWeekHigh', 0)}")
+            fifty_two_week_high = info.get('fiftyTwoWeekHigh')
+            custom_metric("52周最高", f"${fifty_two_week_high}" if fifty_two_week_high else "未获取到")
         with col3:
-            custom_metric("52周最低", f"${info.get('fiftyTwoWeekLow', 0)}")
+            fifty_two_week_low = info.get('fiftyTwoWeekLow')
+            custom_metric("52周最低", f"${fifty_two_week_low}" if fifty_two_week_low else "未获取到")
             
         st.markdown("#### 公司简介")
         # 尝试翻译简介或者直接显示英文
@@ -1283,8 +1283,8 @@ def show_stock_details(ticker):
             cost = holding['cost']
             
             # 计算持仓市值 (如果能获取到当前价格)
-            current_price = info.get('currentPrice', 0)
-            market_value_str = "N/A"
+            current_price = info.get('currentPrice')
+            market_value_str = "未获取到"
             if current_price and shares:
                  market_value = current_price * shares
                  market_value_str = f"${market_value:,.2f}"
